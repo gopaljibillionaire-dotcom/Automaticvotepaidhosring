@@ -192,14 +192,51 @@ class TaskQueue:
     async def add_task(self, task_id: int, creator_id: int, task_type: str, payload: dict, bot_instance: Bot):
         await self.queue.put((task_id, creator_id, task_type, payload, bot_instance))
 
+    def clear_pending_queue(self):
+        """Clears out all backlogged items inside the memory pipe queue safely."""
+        while not self.queue.empty():
+            try:
+                self.queue.get_nowait()
+                self.queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+
+    async def cancel_all_active_tasks(self) -> int:
+        """Kills actively spinning event loop execution workers immediately."""
+        count = 0
+        self.clear_pending_queue()
+        
+        # Clone current keys to safely modify during iteration
+        active_ids = list(self.current_tasks.keys())
+        for t_id in active_ids:
+            loop_task = self.current_tasks.get(t_id)
+            if loop_task and not loop_task.done():
+                loop_task.cancel()
+                count += 1
+                
+                # Update status entry in background
+                async with aiosqlite.connect(db_mgr.db_path) as db:
+                    await db.execute(
+                        "UPDATE tasks SET status = 'cancelled', progress = 'Terminated via Panic Command' WHERE task_id = ?", 
+                        (t_id,)
+                    )
+                    await db.commit()
+        return count
+
     async def start_worker(self):
         logger.info("Anti-Ban Task pipeline processing loop started.")
         while True:
-            task_id, creator_id, task_type, payload, bot_instance = await self.queue.get()
+            try:
+                task_id, creator_id, task_type, payload, bot_instance = await self.queue.get()
+            except asyncio.CancelledError:
+                break
+                
             loop_task = asyncio.create_task(self.execute_task(task_id, creator_id, task_type, payload, bot_instance))
             self.current_tasks[task_id] = loop_task
             try:
                 await loop_task
+            except asyncio.CancelledError:
+                logger.warning(f"Task #{task_id} execution was forcefully cancelled via panic event loop command.")
             except Exception as e:
                 logger.error(f"Execution failure on task #{task_id}: {e}")
             finally:
@@ -467,7 +504,8 @@ async def cmd_start(message: Message, state: FSMContext, bot: Bot):
         f"👋 Welcome to the **Multi-Account Automation Framework**!\n\n"
         f"👤 **Account ID:** `{user_id}`\n"
         f"🛡️ **System Privilege Level:** `{role.upper()}`\n\n"
-        "Deploy, coordinate, and monitor distributed infrastructure tasks safely."
+        "Deploy, coordinate, and monitor distributed infrastructure tasks safely.\n"
+        "💡 Use `/canceltasks` anytime to kill running actions immediately."
     )
     await message.answer(welcome_text, reply_markup=get_main_keyboard(role))
 
@@ -481,6 +519,27 @@ async def handle_main_menu(callback: CallbackQuery, state: FSMContext, bot: Bot)
         "👋 **Main Control Console**\nSelect an action vector below:",
         reply_markup=get_main_keyboard(role)
     )
+
+# --- GLOBAL EMERGENCY TASK CANCELLATION COMMAND ---
+@router.message(Command("canceltasks"))
+async def cmd_cancel_tasks(message: Message, bot: Bot):
+    user_id = message.from_user.id
+    role = await db_mgr.get_user_role(user_id)
+    
+    if role not in ["admin", "owner", "super_owner"]:
+        await message.answer("🚫 Access Denied: Insufficient orchestration privileges.")
+        return
+
+    await message.answer("🛑 **Emergency Panic Instruction Received.** Halting pipeline channels...")
+    killed_count = await task_queue.cancel_all_active_tasks()
+    
+    # Batch change remaining pending entries inside persistent DB structure
+    async with aiosqlite.connect(db_mgr.db_path) as db:
+        await db.execute("UPDATE tasks SET status = 'cancelled' WHERE status = 'pending' OR status = 'running'")
+        await db.commit()
+        
+    await db_mgr.log_action(user_id, f"Triggered global `/canceltasks` loop termination. Halted {killed_count} threads.", bot)
+    await message.answer(f"✅ **Pipeline Terminated!**\nKilled `{killed_count}` active running loops and flushed all pending backlogged queue structures cleanly.")
 
 # --- DEVELOPER ATTRIBUTIONS ROUTING PANEL ---
 @router.callback_query(F.data == "system_credits")
@@ -591,6 +650,9 @@ async def list_user_accounts(callback: CallbackQuery, bot: Bot):
                 InlineKeyboardButton(text="📥 Export Session (.txt)", callback_data="select_export_session"),
                 InlineKeyboardButton(text="📦 Bulk Admin Export", callback_data="bulk_admin_export")
             ],
+            [
+                InlineKeyboardButton(text="💥 Delete All Dead Logs", callback_data="purge_dead_accounts")
+            ],
             [InlineKeyboardButton(text="🔙 Back", callback_data="main_menu")]
         ]
         
@@ -601,6 +663,26 @@ async def list_user_accounts(callback: CallbackQuery, bot: Bot):
     except Exception as e:
         logger.error(f"Error in list_user_accounts: {e}")
         await callback.message.answer(f"⚠️ **Core UI pipeline error**: {e}\nPlease check terminal logs.")
+
+# --- PURGE/DELETE DEAD ACCOUNTS ENGINE ---
+@router.callback_query(F.data == "purge_dead_accounts")
+async def handle_purge_dead_accounts(callback: CallbackQuery, bot: Bot):
+    user_id = callback.from_user.id
+    role = await db_mgr.get_user_role(user_id)
+    
+    async with aiosqlite.connect(db_mgr.db_path) as db:
+        if role in ["admin", "owner", "super_owner"]:
+            cursor = await db.execute("DELETE FROM accounts WHERE status = 'dead'")
+        else:
+            cursor = await db.execute("DELETE FROM accounts WHERE status = 'dead' AND user_id = ?", (user_id,))
+        changes = db.total_changes
+        await db.commit()
+
+    await callback.answer(f"🔥 Successfully purged {changes} logs!", show_alert=True)
+    await db_mgr.log_action(user_id, f"Purged dead account structures from cluster log database. Removed: {changes}", bot)
+    
+    # Refresh view layout map matrix cleanly
+    await list_user_accounts(callback, bot)
 
 # --- LINK VIA STRING SESSION OR STR FILE ---
 @router.callback_query(F.data == "add_account_session")
@@ -1302,7 +1384,8 @@ async def handle_admin_panel(callback: CallbackQuery, bot: Bot):
         "🛠️ **Administrative Infrastructure Management Console**\n"
         "Use text command allocations for core configurations:\n\n"
         "🔹 `/addadmin <id> <limit>`\n"
-        "🔹 `/removeadmin <id>`",
+        "🔹 `/removeadmin <id>`\n"
+        "🔹 `/canceltasks` (Global Kill Active Task Runner Pipeline)",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back", callback_data="main_menu")]])
     )
 
