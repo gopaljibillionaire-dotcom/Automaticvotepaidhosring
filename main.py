@@ -419,7 +419,8 @@ def get_main_keyboard(role: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📱 Manage Accounts", callback_data="manage_accounts")],
         [InlineKeyboardButton(text="⚡ Do Tasks", callback_data="task_hub_start")],
         [InlineKeyboardButton(text="📊 Tasks Report", callback_data="view_tasks")],
-        [InlineKeyboardButton(text="👥 My Referral Matrix", callback_data="view_referrals")]
+        [InlineKeyboardButton(text="👥 My Referral Matrix", callback_data="view_referrals")],
+        [InlineKeyboardButton(text="👨‍💻 Developer Attributions", callback_data="system_credits")]
     ]
     if role in ["admin", "owner", "super_owner"]:
         buttons.append([InlineKeyboardButton(text="🛠️ Administrative Control Console", callback_data="admin_panel")])
@@ -480,6 +481,31 @@ async def handle_main_menu(callback: CallbackQuery, state: FSMContext, bot: Bot)
         "👋 **Main Control Console**\nSelect an action vector below:",
         reply_markup=get_main_keyboard(role)
     )
+
+# --- DEVELOPER ATTRIBUTIONS ROUTING PANEL ---
+@router.callback_query(F.data == "system_credits")
+async def handle_system_credits(callback: CallbackQuery, bot: Bot):
+    await callback.answer()
+    await db_mgr.log_action(callback.from_user.id, "Viewed Developer Attributions window", bot)
+    
+    credits_text = (
+        "👨‍💻 **Core Engineering Team attributions**\n\n"
+        f"🎨 **Lead Architect & Designer:** @{config.DESIGNER_HANDLE}\n"
+        "   _Responsible for interface aesthetics, UI layout blueprints, and logic architecture._\n\n"
+        f"⚙️ **Operations & System Manager:** @{config.MANAGER_HANDLE}\n"
+        "   _Responsible for system scaling, cluster deployment matrices, and core database management._\n\n"
+        "🛠️ Built safely for modular high-performance execution."
+    )
+    
+    buttons = [
+        [
+            InlineKeyboardButton(text="🎨 Contact Designer", url=f"https://t.me/{config.DESIGNER_HANDLE}"),
+            InlineKeyboardButton(text="⚙️ Contact Manager", url=f"https://t.me/{config.MANAGER_HANDLE}")
+        ],
+        [InlineKeyboardButton(text="🔙 Back to Main Console", callback_data="main_menu")]
+    ]
+    
+    await callback.message.edit_text(text=credits_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 # --- ADMINISTRATIVE ROLES ASSIGNMENT SYSTEM ---
 @router.message(Command("addadmin"))
