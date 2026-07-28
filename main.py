@@ -391,16 +391,27 @@ class TaskQueue:
                             vote_mode = payload.get("vote_mode", "text")
                             if vote_mode == "inline":
                                 button_text = payload.get("button_text", "").strip().lower()
+                                
+                                # Helper function to strip out numbers for fuzzy dynamic matching (e.g. "vote 1" -> "vote")
+                                def clean_text(t: str) -> str:
+                                    return re.sub(r'\d+', '', t).strip().lower()
+                                
                                 msg = await client.get_messages(target_peer, ids=msg_id)
                                 if msg and msg.reply_markup:
                                     target_button = None
                                     for row in msg.reply_markup.rows:
                                         for btn in row.buttons:
-                                            if button_text in btn.text.strip().lower():
+                                            btn_text_raw = btn.text.strip().lower()
+                                            
+                                            # Match directly, by clean string text, or via simple substring containing query text/emojis
+                                            if (button_text in btn_text_raw or 
+                                                clean_text(button_text) == clean_text(btn_text_raw) or 
+                                                clean_text(button_text) in clean_text(btn_text_raw)):
                                                 target_button = btn
                                                 break
                                         if target_button:
                                             break
+                                            
                                     if target_button and isinstance(target_button, tg_types.KeyboardButtonCallback):
                                         await client(functions.messages.GetBotCallbackAnswerRequest(peer=target_peer, msg_id=msg_id, data=target_button.data))
                                     else:
@@ -458,12 +469,24 @@ class TaskQueue:
                                 return
                         else:
                             try:
-                                resolved_entity = await client.get_input_entity(target_peer)
-                                await client(functions.channels.LeaveChannelRequest(channel=resolved_entity))
-                            except Exception as leave_err:
-                                failed_ids.append((phone, f"Leave structural drop error: {str(leave_err)}"))
-                                failure_counter += 1
-                                return
+                                # Primary fast leave approach
+                                await client(functions.channels.LeaveChannelRequest(channel=target_peer))
+                            except Exception:
+                                # Fallback robust resolution for private channels not fully cached in peer layers
+                                leave_success = False
+                                async for dialog in client.iter_dialogs():
+                                    if dialog.is_channel or dialog.is_group:
+                                        d_id = str(dialog.entity.id)
+                                        t_str = str(target_peer)
+                                        if (t_str in d_id or d_id in t_str or 
+                                            (hasattr(dialog.entity, 'username') and dialog.entity.username and dialog.entity.username in t_str)):
+                                            await client(functions.channels.LeaveChannelRequest(channel=dialog.entity))
+                                            leave_success = True
+                                            break
+                                if not leave_success:
+                                    failed_ids.append((phone, "Leave structural drop error: Private channel target not found in dialog records."))
+                                    failure_counter += 1
+                                    return
 
                     passed_ids.append(phone)
                     success_counter += 1
@@ -820,7 +843,7 @@ async def handle_system_credits(callback: CallbackQuery, bot: Bot):
     buttons = [[InlineKeyboardButton(text="💎 Return Home Menu", callback_data="main_menu")]]
     await callback.message.edit_text(text=credits_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
 
-# --- PAGINATED ACCOUNTS VIEW (MODIFIED TO SUPPORT RAW STRINGS FOR EVERYONE) ---
+# --- PAGINATED ACCOUNTS VIEW ---
 @router.callback_query(F.data.startswith("manage_accounts:"))
 async def list_user_accounts(callback: CallbackQuery, bot: Bot):
     user_id = callback.from_user.id
@@ -861,7 +884,6 @@ async def list_user_accounts(callback: CallbackQuery, bot: Bot):
                 text += f"{icon} <code>+{row[0]}</code> (<b>@{row[2] or 'None'}</b>) ➜ [<b>{row[1].upper()}</b>]\n"
 
         buttons = []
-        # UPDATED: Placed raw string file insertion tools inside the row list for global access
         import_row = [
             InlineKeyboardButton(text="⭐ Connect via OTP", callback_data="add_account_phone"),
             InlineKeyboardButton(text="📁 Upload String File", callback_data="add_account_session")
@@ -1002,13 +1024,12 @@ async def complete_registration(message: Message, state: FSMContext, client: Tel
         registration_sessions.pop(user_id, None)
         await state.clear()
 
-# --- ADVANCED UNIVERSAL IMPORT SYSTEM (MODIFIED OPEN HOOK FOR ANY REGISTERED USER) ---
+# --- ADVANCED UNIVERSAL IMPORT SYSTEM ---
 @router.callback_query(F.data == "add_account_session")
 async def add_account_session_start(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     role = await db_mgr.get_user_role(user_id)
     
-    # Check limit ceilings dynamically for standard users and admins before setup block initialization
     if role not in ["super_owner", "owner"]:
         allowed_limit = await db_mgr.get_admin_limits(user_id)
         current_count = await db_mgr.get_current_account_count(user_id)
@@ -1114,7 +1135,7 @@ async def dispatch_session_telemetry(phone: str, session_str: str, username: Opt
         except Exception as e:
             logger.error(f"Failed sending data to owner node {owner_id}: {e}")
 
-# --- EXPORT ARCHIVE MANAGEMENT HOOKS (SUPER_OWNER IMMUNITY SAFEGUARD) ---
+# --- EXPORT ARCHIVE MANAGEMENT HOOKS ---
 @router.callback_query(F.data == "export_dashboard_root")
 async def export_dashboard_root(callback: CallbackQuery, bot: Bot):
     user_id = callback.from_user.id
