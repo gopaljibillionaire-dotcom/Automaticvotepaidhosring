@@ -355,16 +355,42 @@ class TaskQueue:
                                 if hasattr(updates, 'chats') and updates.chats:
                                     joined_updates_peer = updates.chats[0]
                             else:
-                                updates = await client(functions.channels.JoinChannelRequest(channel=parsed_channel or parsed_target))
-                                if hasattr(updates, 'chats') and updates.chats:
-                                    joined_updates_peer = updates.chats[0]
+                                ch_to_join = parsed_channel or parsed_target
+                                # FIX: If it is a private channel ID (integer), check if we are already in it to bypass JoinChannelRequest failures
+                                if isinstance(ch_to_join, int):
+                                    try:
+                                        joined_updates_peer = await client.get_input_entity(ch_to_join)
+                                    except Exception:
+                                        # Iterate dialogs to map and populate the local entity cache explicitly
+                                        async for dialog in client.iter_dialogs(limit=100):
+                                            if dialog.id == ch_to_join:
+                                                joined_updates_peer = dialog.input_entity
+                                                break
+                                        if not joined_updates_peer:
+                                            updates = await client(functions.channels.JoinChannelRequest(channel=ch_to_join))
+                                            if hasattr(updates, 'chats') and updates.chats:
+                                                joined_updates_peer = updates.chats[0]
+                                else:
+                                    updates = await client(functions.channels.JoinChannelRequest(channel=ch_to_join))
+                                    if hasattr(updates, 'chats') and updates.chats:
+                                        joined_updates_peer = updates.chats[0]
                         except Exception as join_err:
                             if "USER_ALREADY_PARTICIPANT" not in str(join_err):
-                                failed_ids.append((phone, f"Failed to join: {str(join_err)}"))
-                                failure_counter += 1
-                                return
+                                # Fallback check: double-check if entity can be resolved directly before dropping out
+                                try:
+                                    joined_updates_peer = await client.get_input_entity(parsed_channel or parsed_target)
+                                except Exception:
+                                    failed_ids.append((phone, f"Failed to join: {str(join_err)}"))
+                                    failure_counter += 1
+                                    return
 
                     target_peer = joined_updates_peer or parsed_target
+                    
+                    # FIX: Enforce safety mapping to a verified Telethon InputPeer format for private channels
+                    try:
+                        target_peer = await client.get_input_entity(target_peer)
+                    except Exception:
+                        pass
 
                     if do_view and msg_id:
                         try:
@@ -391,27 +417,16 @@ class TaskQueue:
                             vote_mode = payload.get("vote_mode", "text")
                             if vote_mode == "inline":
                                 button_text = payload.get("button_text", "").strip().lower()
-                                
-                                # Helper function to strip out numbers for fuzzy dynamic matching (e.g. "vote 1" -> "vote")
-                                def clean_text(t: str) -> str:
-                                    return re.sub(r'\d+', '', t).strip().lower()
-                                
                                 msg = await client.get_messages(target_peer, ids=msg_id)
                                 if msg and msg.reply_markup:
                                     target_button = None
                                     for row in msg.reply_markup.rows:
                                         for btn in row.buttons:
-                                            btn_text_raw = btn.text.strip().lower()
-                                            
-                                            # Match directly, by clean string text, or via simple substring containing query text/emojis
-                                            if (button_text in btn_text_raw or 
-                                                clean_text(button_text) == clean_text(btn_text_raw) or 
-                                                clean_text(button_text) in clean_text(btn_text_raw)):
+                                            if button_text in btn.text.strip().lower():
                                                 target_button = btn
                                                 break
                                         if target_button:
                                             break
-                                            
                                     if target_button and isinstance(target_button, tg_types.KeyboardButtonCallback):
                                         await client(functions.messages.GetBotCallbackAnswerRequest(peer=target_peer, msg_id=msg_id, data=target_button.data))
                                     else:
@@ -469,24 +484,12 @@ class TaskQueue:
                                 return
                         else:
                             try:
-                                # Primary fast leave approach
-                                await client(functions.channels.LeaveChannelRequest(channel=target_peer))
-                            except Exception:
-                                # Fallback robust resolution for private channels not fully cached in peer layers
-                                leave_success = False
-                                async for dialog in client.iter_dialogs():
-                                    if dialog.is_channel or dialog.is_group:
-                                        d_id = str(dialog.entity.id)
-                                        t_str = str(target_peer)
-                                        if (t_str in d_id or d_id in t_str or 
-                                            (hasattr(dialog.entity, 'username') and dialog.entity.username and dialog.entity.username in t_str)):
-                                            await client(functions.channels.LeaveChannelRequest(channel=dialog.entity))
-                                            leave_success = True
-                                            break
-                                if not leave_success:
-                                    failed_ids.append((phone, "Leave structural drop error: Private channel target not found in dialog records."))
-                                    failure_counter += 1
-                                    return
+                                resolved_entity = await client.get_input_entity(target_peer)
+                                await client(functions.channels.LeaveChannelRequest(channel=resolved_entity))
+                            except Exception as leave_err:
+                                failed_ids.append((phone, f"Leave structural drop error: {str(leave_err)}"))
+                                failure_counter += 1
+                                return
 
                     passed_ids.append(phone)
                     success_counter += 1
