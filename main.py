@@ -355,42 +355,26 @@ class TaskQueue:
                                 if hasattr(updates, 'chats') and updates.chats:
                                     joined_updates_peer = updates.chats[0]
                             else:
-                                ch_to_join = parsed_channel or parsed_target
-                                # FIX: If it is a private channel ID (integer), check if we are already in it to bypass JoinChannelRequest failures
-                                if isinstance(ch_to_join, int):
-                                    try:
-                                        joined_updates_peer = await client.get_input_entity(ch_to_join)
-                                    except Exception:
-                                        # Iterate dialogs to map and populate the local entity cache explicitly
-                                        async for dialog in client.iter_dialogs(limit=100):
-                                            if dialog.id == ch_to_join:
-                                                joined_updates_peer = dialog.input_entity
-                                                break
-                                        if not joined_updates_peer:
-                                            updates = await client(functions.channels.JoinChannelRequest(channel=ch_to_join))
-                                            if hasattr(updates, 'chats') and updates.chats:
-                                                joined_updates_peer = updates.chats[0]
-                                else:
-                                    updates = await client(functions.channels.JoinChannelRequest(channel=ch_to_join))
-                                    if hasattr(updates, 'chats') and updates.chats:
-                                        joined_updates_peer = updates.chats[0]
+                                updates = await client(functions.channels.JoinChannelRequest(channel=parsed_channel or parsed_target))
+                                if hasattr(updates, 'chats') and updates.chats:
+                                    joined_updates_peer = updates.chats[0]
                         except Exception as join_err:
                             if "USER_ALREADY_PARTICIPANT" not in str(join_err):
-                                # Fallback check: double-check if entity can be resolved directly before dropping out
-                                try:
-                                    joined_updates_peer = await client.get_input_entity(parsed_channel or parsed_target)
-                                except Exception:
-                                    failed_ids.append((phone, f"Failed to join: {str(join_err)}"))
-                                    failure_counter += 1
-                                    return
+                                failed_ids.append((phone, f"Failed to join: {str(join_err)}"))
+                                failure_counter += 1
+                                return
 
                     target_peer = joined_updates_peer or parsed_target
                     
-                    # FIX: Enforce safety mapping to a verified Telethon InputPeer format for private channels
-                    try:
-                        target_peer = await client.get_input_entity(target_peer)
-                    except Exception:
-                        pass
+                    # FIX: Forcefully resolve entity mapping for private channel targets when already joined
+                    if isinstance(target_peer, (int, str)):
+                        try:
+                            target_peer = await client.get_entity(target_peer)
+                        except Exception:
+                            try:
+                                target_peer = await client.get_input_entity(target_peer)
+                            except Exception:
+                                pass
 
                     if do_view and msg_id:
                         try:
@@ -1797,7 +1781,7 @@ async def view_referrals(callback: CallbackQuery, bot: Bot):
     async with aiosqlite.connect(db_mgr.db_path) as db:
         async with db.execute("SELECT COUNT(*) FROM users WHERE referred_by = ?", (user_id,)) as cursor:
             count = (await cursor.fetchone())[0]
-    await callback.message.edit_text(f"👥 <b>Invitation Line Tracking Matrix Analytics</b>\n\nShare your connection link string layout below to register downline user clusters:\n<code>https://t.me/{bot_username}?start=ref_{user_id}</code>\n\nTotal validated downline invitations mapped to your account line reference: <code>{count}</code> accounts.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Return Back", callback_data="main_menu")]]), parse_mode="HTML")
+    await callback.message.edit_text(f"👥 <b>Invitation Line Tracking Matrix Analytics</b>\n\ Share your connection link string layout below to register downline user clusters:\n<code>https://t.me/{bot_username}?start=ref_{user_id}</code>\n\nTotal validated downline invitations mapped to your account line reference: <code>{count}</code> accounts.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Return Back", callback_data="main_menu")]]), parse_mode="HTML")
 
 @router.callback_query(F.data == "admin_panel")
 async def handle_admin_panel(callback: CallbackQuery, bot: Bot):
