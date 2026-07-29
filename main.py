@@ -277,7 +277,6 @@ class TaskQueue:
                 query = "SELECT phone, session_string FROM accounts WHERE status = 'active'"
                 cursor = await db.execute(query)
             else:
-                # Admins and regular users can ONLY use their own added IDs
                 query = "SELECT phone, session_string FROM accounts WHERE status = 'active' AND user_id = ?"
                 cursor = await db.execute(query, (creator_id,))
             
@@ -821,7 +820,7 @@ async def handle_system_credits(callback: CallbackQuery, bot: Bot):
     buttons = [[InlineKeyboardButton(text="💎 Return Home Menu", callback_data="main_menu")]]
     await callback.message.edit_text(text=credits_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
 
-# --- PAGINATED ACCOUNTS VIEW ---
+# --- PAGINATED ACCOUNTS VIEW (MODIFIED TO SUPPORT RAW STRINGS FOR EVERYONE) ---
 @router.callback_query(F.data.startswith("manage_accounts:"))
 async def list_user_accounts(callback: CallbackQuery, bot: Bot):
     user_id = callback.from_user.id
@@ -834,7 +833,6 @@ async def list_user_accounts(callback: CallbackQuery, bot: Bot):
         role = await db_mgr.get_user_role(user_id)
         
         async with aiosqlite.connect(db_mgr.db_path) as db:
-            # Admins are now treated like regular users here: they ONLY see their own accounts
             if role in ["owner", "super_owner"]:
                 count_query = "SELECT COUNT(*) FROM accounts"
                 cursor_count = await db.execute(count_query)
@@ -863,14 +861,13 @@ async def list_user_accounts(callback: CallbackQuery, bot: Bot):
                 text += f"{icon} <code>+{row[0]}</code> (<b>@{row[2] or 'None'}</b>) ➜ [<b>{row[1].upper()}</b>]\n"
 
         buttons = []
-        import_row = [InlineKeyboardButton(text="⭐ Connect via OTP", callback_data="add_account_phone")]
-        
-        # Allowed for any authorized management tier role to import via text string or string files
-        if role in ["super_owner", "owner", "admin"]:
-            import_row.append(InlineKeyboardButton(text="📁 Upload String File", callback_data="add_account_session"))
+        # UPDATED: Placed raw string file insertion tools inside the row list for global access
+        import_row = [
+            InlineKeyboardButton(text="⭐ Connect via OTP", callback_data="add_account_phone"),
+            InlineKeyboardButton(text="📁 Upload String File", callback_data="add_account_session")
+        ]
         buttons.append(import_row)
 
-        # STRICT EXCLUSION: Admins cannot see or open extraction dashboard options
         if role in ["super_owner", "owner"]:
             buttons.append([InlineKeyboardButton(text="📥 Open Session Export Dashboard", callback_data="export_dashboard_root")])
             
@@ -912,7 +909,6 @@ async def add_account_start(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     role = await db_mgr.get_user_role(user_id)
     
-    # Enforce admin capacity constraint ceilings before processing registration pipelines
     if role not in ["super_owner", "owner"]:
         allowed_limit = await db_mgr.get_admin_limits(user_id)
         current_count = await db_mgr.get_current_account_count(user_id)
@@ -1006,14 +1002,20 @@ async def complete_registration(message: Message, state: FSMContext, client: Tel
         registration_sessions.pop(user_id, None)
         await state.clear()
 
-# --- ADVANCED UNIVERSAL IMPORT SYSTEM (Accepts Any .txt, .session, or Raw Strings) ---
+# --- ADVANCED UNIVERSAL IMPORT SYSTEM (MODIFIED OPEN HOOK FOR ANY REGISTERED USER) ---
 @router.callback_query(F.data == "add_account_session")
 async def add_account_session_start(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     role = await db_mgr.get_user_role(user_id)
-    if role not in ["super_owner", "owner", "admin"]:
-        await callback.answer("⚠️ Non-administrative accounts are restricted from file injection channels.", show_alert=True)
-        return
+    
+    # Check limit ceilings dynamically for standard users and admins before setup block initialization
+    if role not in ["super_owner", "owner"]:
+        allowed_limit = await db_mgr.get_admin_limits(user_id)
+        current_count = await db_mgr.get_current_account_count(user_id)
+        if current_count >= allowed_limit:
+            await callback.answer(f"❌ Limits Exceeded: Your profile cap is restricted to maximum {allowed_limit} account rows.", show_alert=True)
+            return
+
     await callback.answer()
     await callback.message.edit_text("📁 <b>Drop your raw telethon string session strings layout, text line values, or upload a .txt / .session file log:</b>\n<i>(Supports bulk multi-line files imports!)</i>", parse_mode="HTML")
     await state.set_state(RegistrationStates.waiting_for_session_file)
@@ -1036,7 +1038,6 @@ async def process_session_file(message: Message, state: FSMContext, bot: Bot):
         await state.clear()
         return
 
-    # Extract all candidate telethon string session tokens via a clean multi-line match layout
     potential_sessions = [s.strip() for s in re.split(r'[\r\n,;]+', raw_content) if len(s.strip()) > 30]
     
     if not potential_sessions:
@@ -1051,7 +1052,6 @@ async def process_session_file(message: Message, state: FSMContext, bot: Bot):
     quota_reached = False
 
     for session_str in potential_sessions:
-        # Check quota space left dynamically on each iteration block loop for admins
         if role not in ["super_owner", "owner"]:
             allowed_limit = await db_mgr.get_admin_limits(user_id)
             current_count = await db_mgr.get_current_account_count(user_id)
@@ -1120,7 +1120,6 @@ async def export_dashboard_root(callback: CallbackQuery, bot: Bot):
     user_id = callback.from_user.id
     role = await db_mgr.get_user_role(user_id)
     
-    # Strictly reject admin accounts from accessing files or session extraction features entirely
     if role not in ["super_owner", "owner"]:
         await callback.answer("⚠️ Clearance Level Violated: File extraction dashboard tools are barred for admins.", show_alert=True)
         return
@@ -1662,7 +1661,6 @@ async def prompt_for_account_scale(message: Message, state: FSMContext):
         elif role == "owner":
             cursor = await db.execute("SELECT COUNT(*) FROM accounts WHERE status = 'active'")
         else:
-            # Admins are now isolated strictly to their own accounts pool count
             cursor = await db.execute("SELECT COUNT(*) FROM accounts WHERE status = 'active' AND user_id = ?", (user_id,))
         max_available = (await cursor.fetchone())[0]
         
