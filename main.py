@@ -186,27 +186,50 @@ class TaskQueue:
                     do_dm = task_type == "dm"
                     do_refer = task_type == "refer"
 
-                    joined_updates_peer = None
+                    target_peer = None
 
+                    # 1. Handle Join/Resolve Phase cleanly across private links
                     if do_join:
                         try:
                             if is_channel_private or "+ " in channel_target or "/+" in channel_target or "joinchat/" in channel_target:
                                 invite_hash = parsed_channel if is_channel_private else parsed_target
                                 updates = await client(functions.messages.ImportChatInviteRequest(hash=str(invite_hash).strip()))
                                 if hasattr(updates, 'chats') and updates.chats:
-                                    joined_updates_peer = updates.chats[0]
+                                    target_peer = updates.chats[0]
                             else:
                                 updates = await client(functions.channels.JoinChannelRequest(channel=parsed_channel or parsed_target))
                                 if hasattr(updates, 'chats') and updates.chats:
-                                    joined_updates_peer = updates.chats[0]
+                                    target_peer = updates.chats[0]
                         except Exception as join_err:
                             if "USER_ALREADY_PARTICIPANT" not in str(join_err):
                                 failed_ids.append((phone, f"Failed to join: {str(join_err)}"))
                                 failure_counter += 1
                                 return
 
-                    target_peer = joined_updates_peer or parsed_target
+                    # 2. Fallback resolution if already joined or if target_peer is still None
+                    if not target_peer and not do_leave_all:
+                        try:
+                            # Try resolving using the primary channel target identifier first
+                            target_peer = await client.get_entity(parsed_channel or parsed_target)
+                        except Exception:
+                            try:
+                                # Final structural check using the full baseline target identity parameters
+                                target_peer = await client.get_entity(parsed_target)
+                            except Exception as ent_err:
+                                # For private networks, check if the client can see the message content directly
+                                if msg_id:
+                                    try:
+                                        msg_obj = await client.get_messages(parsed_channel or parsed_target, ids=msg_id)
+                                        if msg_obj:
+                                            target_peer = msg_obj.peer_id
+                                    except Exception:
+                                        pass
+                                if not target_peer:
+                                    failed_ids.append((phone, f"Entity resolution failure: {str(ent_err)}"))
+                                    failure_counter += 1
+                                    return
 
+                    # --- CORE ACTIONS CORRECTION GRID ---
                     if do_view and msg_id:
                         try:
                             await client(functions.messages.GetMessagesViewsRequest(peer=target_peer, id=[msg_id], increment=True))
@@ -299,8 +322,10 @@ class TaskQueue:
                                 return
                         else:
                             try:
-                                resolved_entity = await client.get_input_entity(target_peer)
-                                await client(functions.channels.LeaveChannelRequest(channel=resolved_entity))
+                                # Resolves private entities inside structural links cleanly prior to firing leave event requests
+                                leave_target = target_peer or await client.get_entity(parsed_channel or parsed_target)
+                                input_channel = await client.get_input_entity(leave_target)
+                                await client(functions.channels.LeaveChannelRequest(channel=input_channel))
                             except Exception as leave_err:
                                 failed_ids.append((phone, f"Leave structural drop error: {str(leave_err)}"))
                                 failure_counter += 1
