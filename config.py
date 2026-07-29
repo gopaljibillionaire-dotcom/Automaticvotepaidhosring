@@ -11,8 +11,8 @@ logging.basicConfig(
 logger = logging.getLogger("MultiAccountSystem")
 
 # --- CREDENTIALS ---
-API_ID = int(os.getenv("TG_API_ID", "34043431"))
-API_HASH = os.getenv("TG_API_HASH", "1b35dae0978194f1088cb6168b70779c")
+API_ID = int(os.getenv("TG_API_ID", "39314327"))
+API_HASH = os.getenv("TG_API_HASH", "c5acbe2a40062d1141713e95c9f704d6")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8788369960:AAHoheW7W5tpcRdqxa4Nekx4rxefc_4z3YY")
 
 # HARDCODED SUPER-OWNER IDS
