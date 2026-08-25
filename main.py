@@ -20,28 +20,32 @@ from aiogram.types import (
 
 from config import settings
 
+# ==========================================
+# LOGGING CONFIGURATION
+# ==========================================
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(name)s - %(levelname)s - [%(levelname)s] - %(message)s"
 )
 logger = logging.getLogger("egg_chicken_bot")
 
 # ==========================================
-# CONFIGURATION CONSTANTS
+# CONSTANTS & ASSETS
 # ==========================================
-UPI_QR_IMAGE_URL = "https://i.ibb.co/example/your-upi-qr.png"  # 👈 Replace with your actual ImgBB URL
-USDT_TRC20_ADDRESS = "TYourTRC20WalletAddressHere"            # 👈 Replace with your TRC20 Address
-TON_ADDRESS = "EQYourTonWalletAddressHere"                     # 👈 Replace with your TON Address
+UPI_QR_IMAGE_URL = "https://i.ibb.co/example/your-upi-qr.png"
+USDT_TRC20_ADDRESS = "TYourTRC20WalletAddressHere"
+TON_ADDRESS = "EQYourTonWalletAddressHere"
 
 # ==========================================
-# DATABASE INITIALIZATION
+# DATABASE SCHEMAS & INITIALIZATION
 # ==========================================
 
 async def init_db():
+    """Initializes database tables asynchronously."""
     async with aiosqlite.connect(settings.DATABASE_NAME) as db:
         await db.execute("PRAGMA foreign_keys = ON;")
         
-        # Users Table
+        # 1. Users Table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 telegram_id INTEGER PRIMARY KEY,
@@ -53,7 +57,7 @@ async def init_db():
             )
         """)
         
-        # Countries Table
+        # 2. Countries Table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS countries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,24 +68,24 @@ async def init_db():
             )
         """)
         
-        # Products Table
+        # 3. Products Table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS products (
                 product_id TEXT PRIMARY KEY,
-                seller_id INTEGER NOT NULL, -- 0 for Admin, Telegram ID for Users
+                seller_id INTEGER NOT NULL, -- 0 for Admin, User ID for standard sellers
                 type TEXT NOT NULL, -- 'egg' or 'chicken'
                 country_id INTEGER NOT NULL,
                 price REAL NOT NULL,
                 quality TEXT NOT NULL, -- 'Fresh Egg', 'Broken Egg', 'Fresh Chicken', 'Broken Chicken'
                 description TEXT DEFAULT '',
                 stock INTEGER DEFAULT 1,
-                status TEXT DEFAULT 'available',
+                status TEXT DEFAULT 'available', -- 'available', 'sold', 'disabled'
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (country_id) REFERENCES countries (id) ON DELETE CASCADE
             )
         """)
         
-        # Orders Table
+        # 4. Orders Table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS orders (
                 order_id TEXT PRIMARY KEY,
@@ -89,31 +93,34 @@ async def init_db():
                 product_id TEXT NOT NULL,
                 amount REAL NOT NULL,
                 status TEXT DEFAULT 'completed',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (telegram_id)
             )
         """)
         
-        # Pending Top-ups
+        # 5. Topups Table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS topups (
                 topup_id TEXT PRIMARY KEY,
                 user_id INTEGER NOT NULL,
                 amount REAL NOT NULL,
                 method TEXT NOT NULL,
-                status TEXT DEFAULT 'pending',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                status TEXT DEFAULT 'pending', -- 'pending', 'approved', 'rejected'
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (telegram_id)
             )
         """)
         
-        # Seed default countries if empty
+        # Default Seed Countries
         cursor = await db.execute("SELECT COUNT(*) FROM countries")
         count = (await cursor.fetchone())[0]
         if count == 0:
             default_countries = [
-                ("US", "America", "🇺🇸", 1),
+                ("US", "United States", "🇺🇸", 1),
                 ("IN", "India", "🇮🇳", 1),
                 ("BD", "Bangladesh", "🇧🇩", 1),
-                ("AE", "UAE", "🇦🇪", 1),
+                ("AE", "United Arab Emirates", "🇦🇪", 1),
+                ("GB", "United Kingdom", "🇬🇧", 1),
             ]
             await db.executemany(
                 "INSERT INTO countries (code, name, flag, is_enabled) VALUES (?, ?, ?, ?)",
@@ -123,33 +130,38 @@ async def init_db():
         await db.commit()
 
 def get_db():
+    """Returns sqlite connection context manager."""
     return aiosqlite.connect(settings.DATABASE_NAME)
 
 # ==========================================
-# FSM STATES
+# FINITE STATE MACHINE (FSM)
 # ==========================================
 
 class AddProductFSM(StatesGroup):
     select_type = State()
     select_country = State()
+    select_quality = State()
     enter_id = State()
     enter_price = State()
-    select_quality = State()
     enter_stock = State()
     enter_description = State()
-
-class RechargeFSM(StatesGroup):
-    enter_amount = State()
-    select_method = State()
-    upload_proof = State()
 
 class AddCountryFSM(StatesGroup):
     enter_name = State()
     enter_flag = State()
     enter_code = State()
 
+class RechargeFSM(StatesGroup):
+    enter_amount = State()
+    select_method = State()
+    upload_proof = State()
+
+class AdminUserFSM(StatesGroup):
+    enter_user_id = State()
+    enter_balance_change = State()
+
 # ==========================================
-# KEYBOARD BUILDERS
+# DYNAMIC UI KEYBOARD BUILDERS
 # ==========================================
 
 def get_main_keyboard(user_id: int) -> InlineKeyboardMarkup:
@@ -159,12 +171,15 @@ def get_main_keyboard(user_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🍗 BUY CHICKENS", callback_data="buy_cat:chicken", style="primary")
         ],
         [
-            InlineKeyboardButton(text="➕ SELL MY ITEM", callback_data="user_sell_item", style="success"),
-            InlineKeyboardButton(text="💳 WALLET TOP-UP", callback_data="wallet_topup", style="success")
+            InlineKeyboardButton(text="➕ LIST ITEM FOR SALE", callback_data="user_sell_item", style="success"),
+            InlineKeyboardButton(text="💳 TOP-UP WALLET", callback_data="wallet_topup", style="success")
         ],
         [
             InlineKeyboardButton(text="📦 MY ORDERS", callback_data="my_orders"),
-            InlineKeyboardButton(text="👤 PROFILE", callback_data="my_profile")
+            InlineKeyboardButton(text="👤 MY PROFILE", callback_data="my_profile")
+        ],
+        [
+            InlineKeyboardButton(text="❓ HELP & SUPPORT", callback_data="help")
         ]
     ]
     if user_id in settings.ADMIN_IDS:
@@ -182,7 +197,11 @@ def get_admin_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🌍 Manage Countries", callback_data="admin_manage_countries", style="primary")
         ],
         [
-            InlineKeyboardButton(text="🏠 Main Menu", callback_data="main_menu", style="danger")
+            InlineKeyboardButton(text="📊 Platform Stats", callback_data="admin_stats"),
+            InlineKeyboardButton(text="💳 Adjust User Balance", callback_data="admin_adj_balance")
+        ],
+        [
+            InlineKeyboardButton(text="🏠 User Main Menu", callback_data="main_menu", style="danger")
         ]
     ])
 
@@ -194,7 +213,7 @@ def back_home_buttons() -> List[List[InlineKeyboardButton]]:
     ]
 
 # ==========================================
-# USER & DB HELPERS
+# DATABASE HELPER FUNCTIONS
 # ==========================================
 
 async def get_or_create_user(telegram_id: int, username: Optional[str], first_name: Optional[str]) -> dict:
@@ -214,7 +233,7 @@ async def get_or_create_user(telegram_id: int, username: Optional[str], first_na
             return dict(user)
 
 # ==========================================
-# ROUTERS & HANDLERS
+# ROUTERS & ROUTE HANDLERS
 # ==========================================
 
 router = Router()
@@ -222,12 +241,16 @@ router = Router()
 @router.message(CommandStart())
 async def cmd_start(message: Message):
     user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+    if user['is_blocked']:
+        await message.answer("❌ Your account is suspended.")
+        return
+
     text = (
-        f"🥚 **EGG & CHICKEN MARKETPLACE**\n\n"
-        f"👤 **User:** {user['first_name']}\n"
-        f"🆔 **ID:** `{user['telegram_id']}`\n"
-        f"💰 **Balance:** ${user['balance']:.2f}\n\n"
-        f"Select an option from below:"
+        f"🌟 **WELCOME TO EGG & CHICKEN MARKETPLACE** 🌟\n\n"
+        f"👤 **Account:** {user['first_name']}\n"
+        f"🆔 **User ID:** `{user['telegram_id']}`\n"
+        f"💰 **Available Balance:** **${user['balance']:.2f}**\n\n"
+        f"Select an action using the colored buttons below:"
     )
     await message.answer(text, reply_markup=get_main_keyboard(message.from_user.id), parse_mode="Markdown")
 
@@ -236,27 +259,62 @@ async def cb_main_menu(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
     text = (
-        f"🥚 **EGG & CHICKEN MARKETPLACE**\n\n"
-        f"👤 **User:** {user['first_name']}\n"
-        f"🆔 **ID:** `{user['telegram_id']}`\n"
-        f"💰 **Balance:** ${user['balance']:.2f}"
+        f"🌟 **EGG & CHICKEN MARKETPLACE** 🌟\n\n"
+        f"👤 **Account:** {user['first_name']}\n"
+        f"🆔 **User ID:** `{user['telegram_id']}`\n"
+        f"💰 **Available Balance:** **${user['balance']:.2f}**"
     )
     await callback.message.edit_text(text, reply_markup=get_main_keyboard(callback.from_user.id), parse_mode="Markdown")
 
+@router.callback_query(F.data == "my_profile")
+async def cb_my_profile(callback: CallbackQuery):
+    user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT COUNT(*), SUM(amount) FROM orders WHERE user_id = ?", (user['telegram_id'],)) as c:
+            row = await c.fetchone()
+            total_orders = row[0] or 0
+            total_spent = row[1] or 0.0
+
+    text = (
+        f"👤 **USER PROFILE**\n\n"
+        f"🆔 **ID:** `{user['telegram_id']}`\n"
+        f"👤 **Name:** {user['first_name']}\n"
+        f"🏷 **Username:** @{user['username']}\n"
+        f"💰 **Balance:** ${user['balance']:.2f}\n"
+        f"🛒 **Total Orders:** {total_orders}\n"
+        f"💵 **Total Spent:** ${total_spent:.2f}\n"
+        f"📅 **Joined:** {user['created_at'][:10]}"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=back_home_buttons())
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+
+@router.callback_query(F.data == "help")
+async def cb_help(callback: CallbackQuery):
+    text = (
+        "❓ **MARKETPLACE SUPPORT & HELP**\n\n"
+        "• **Buying:** Browse Eggs or Chickens by Country & Quality.\n"
+        "• **Selling:** List your own stock for sale globally.\n"
+        "• **Top-up:** Fund your wallet via UPI QR or Crypto (USDT/TON).\n"
+        "• **Support:** Contact system admins for manual verifications."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=back_home_buttons())
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+
 # ==========================================
-# BUY FLOW (EGGS & CHICKEN SEPARATE)
+# BUYING MARKETPLACE FLOW
 # ==========================================
 
 @router.callback_query(F.data.startswith("buy_cat:"))
 async def cb_select_category(callback: CallbackQuery):
-    p_type = callback.data.split(":")[1]  # 'egg' or 'chicken'
+    p_type = callback.data.split(":")[1]
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM countries WHERE is_enabled = 1") as cursor:
             countries = await cursor.fetchall()
 
     if not countries:
-        await callback.answer("No countries available right now.", show_alert=True)
+        await callback.answer("No countries currently available.", show_alert=True)
         return
 
     buttons = []
@@ -268,7 +326,7 @@ async def cb_select_category(callback: CallbackQuery):
         )])
     buttons.extend(back_home_buttons())
     
-    title = "🥚 SELECT EGG COUNTRY" if p_type == "egg" else "🍗 SELECT CHICKEN COUNTRY"
+    title = "🥚 SELECT COUNTRY FOR EGGS" if p_type == "egg" else "🍗 SELECT COUNTRY FOR CHICKENS"
     await callback.message.edit_text(title, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 @router.callback_query(F.data.startswith("buy_country:"))
@@ -287,19 +345,19 @@ async def cb_list_products(callback: CallbackQuery):
 
     if not products:
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Back", callback_data=f"buy_cat:{p_type}", style="danger")]])
-        await callback.message.edit_text(f"❌ No available {p_type}s for {country['flag']} {country['name']}.", reply_markup=kb)
+        await callback.message.edit_text(f"❌ No {p_type}s available for {country['flag']} {country['name']}.", reply_markup=kb)
         return
 
-    text = f"<b>{country['flag']} {country['name'].upper()} {p_type.upper()} MARKET</b>\n\n"
+    text = f"<b>{country['flag']} {country['name'].upper()} {p_type.upper()} MARKETPLACE</b>\n\n"
     buttons = []
     for p in products:
-        seller_type = "👑 Admin" if p['seller_id'] == 0 else f"👤 User ({p['seller_id']})"
+        seller_label = "👑 Platform Official" if p['seller_id'] == 0 else f"👤 Seller ID: {p['seller_id']}"
         text += (
             f"🆔 <b>ID:</b> {p['product_id']}\n"
             f"✨ <b>Quality:</b> {p['quality']}\n"
-            f"👤 <b>Seller:</b> {seller_type}\n"
+            f"🏷 <b>Seller:</b> {seller_label}\n"
             f"💰 <b>Price:</b> ${p['price']:.2f}\n"
-            f"📦 <b>Stock:</b> {p['stock']}\n"
+            f"📦 <b>Stock:</b> {p['stock']} available\n"
             f"--------------------------------\n"
         )
         buttons.append([InlineKeyboardButton(
@@ -337,7 +395,6 @@ async def cb_execute_buy(callback: CallbackQuery):
                 await callback.answer(f"❌ Insufficient balance! Required: ${p['price']:.2f}", show_alert=True)
                 return
 
-            # Deduct balance & update stock
             new_balance = user['balance'] - p['price']
             await db.execute("UPDATE users SET balance = ? WHERE telegram_id = ?", (new_balance, user_id))
 
@@ -345,11 +402,10 @@ async def cb_execute_buy(callback: CallbackQuery):
             new_status = 'sold' if new_stock == 0 else 'available'
             await db.execute("UPDATE products SET stock = ?, status = ? WHERE product_id = ?", (new_stock, new_status, prod_id))
 
-            # If sold by another user, add balance to seller
+            # Credit seller if peer-to-peer user sale
             if p['seller_id'] != 0:
                 await db.execute("UPDATE users SET balance = balance + ? WHERE telegram_id = ?", (p['price'], p['seller_id']))
 
-            # Order entry
             order_id = f"ORD-{random.randint(100000, 999999)}"
             await db.execute(
                 "INSERT INTO orders (order_id, user_id, product_id, amount, status) VALUES (?, ?, ?, ?, ?)",
@@ -359,10 +415,10 @@ async def cb_execute_buy(callback: CallbackQuery):
             await db.commit()
 
             text = (
-                f"✅ **PURCHASE SUCCESSFUL**\n\n"
+                f"✅ **ORDER COMPLETED SUCCESSFULLY**\n\n"
                 f"Order ID: `{order_id}`\n"
                 f"Product ID: `{prod_id}`\n"
-                f"Quality: {p['quality']}\n"
+                f"Quality: **{p['quality']}**\n"
                 f"Amount Paid: **${p['price']:.2f}**\n\n"
                 f"💰 Remaining Balance: **${new_balance:.2f}**"
             )
@@ -372,16 +428,16 @@ async def cb_execute_buy(callback: CallbackQuery):
         except Exception as e:
             await db.execute("ROLLBACK")
             logger.error(f"Purchase Error: {e}")
-            await callback.answer("❌ Transaction error.", show_alert=True)
+            await callback.answer("❌ Purchase failed due to a system error.", show_alert=True)
 
 # ==========================================
-# WALLET TOP-UP & PROOF SUBMISSION
+# TOP-UP & PROOF SUBMISSION SYSTEM
 # ==========================================
 
 @router.callback_query(F.data == "wallet_topup")
 async def cb_wallet_topup(callback: CallbackQuery, state: FSMContext):
     await state.set_state(RechargeFSM.enter_amount)
-    await callback.message.edit_text("💳 **WALLET TOP-UP**\n\nEnter the amount in USD ($) you wish to add:", parse_mode="Markdown")
+    await callback.message.edit_text("💳 **WALLET TOP-UP**\n\nEnter the USD amount ($) you want to top-up:", parse_mode="Markdown")
 
 @router.message(StateFilter(RechargeFSM.enter_amount))
 async def process_topup_amount(message: Message, state: FSMContext):
@@ -389,18 +445,18 @@ async def process_topup_amount(message: Message, state: FSMContext):
         amount = float(message.text)
         if amount <= 0: raise ValueError()
     except ValueError:
-        await message.answer("❌ Enter a valid dollar amount.")
+        await message.answer("❌ Invalid numerical amount. Try again:")
         return
 
     await state.update_data(amount=amount)
     await state.set_state(RechargeFSM.select_method)
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🇮🇳 Pay with UPI (QR)", callback_data="pay_method:upi", style="primary")],
-        [InlineKeyboardButton(text="💎 Pay with Crypto (USDT / TON)", callback_data="pay_method:crypto", style="primary")],
+        [InlineKeyboardButton(text="🇮🇳 Pay via UPI QR", callback_data="pay_method:upi", style="primary")],
+        [InlineKeyboardButton(text="💎 Pay via Crypto (USDT / TON)", callback_data="pay_method:crypto", style="primary")],
         [InlineKeyboardButton(text="❌ Cancel", callback_data="main_menu", style="danger")]
     ])
-    await message.answer(f"💰 Amount to top-up: **${amount:.2f}**\n\nSelect Payment Method:", reply_markup=kb, parse_mode="Markdown")
+    await message.answer(f"💰 Selected Amount: **${amount:.2f}**\n\nChoose Payment Channel:", reply_markup=kb, parse_mode="Markdown")
 
 @router.callback_query(F.data.startswith("pay_method:"), StateFilter(RechargeFSM.select_method))
 async def cb_payment_method(callback: CallbackQuery, state: FSMContext):
@@ -412,11 +468,11 @@ async def cb_payment_method(callback: CallbackQuery, state: FSMContext):
 
     if method == "upi":
         text = (
-            f"🇮🇳 **UPI PAYMENT**\n\n"
+            f"🇮🇳 **UPI PAYMENT INSTRUCTIONS**\n\n"
             f"Top-Up ID: `{topup_id}`\n"
             f"Amount: **${amount:.2f}**\n\n"
-            f"Scan the QR code photo below and pay the required amount.\n"
-            f"After paying, click **I Paid** to upload proof."
+            f"Scan the QR code below and transfer payment.\n"
+            f"Click **I Paid** after completing transaction."
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ I Paid", callback_data=f"i_paid:{topup_id}", style="success")],
@@ -427,13 +483,13 @@ async def cb_payment_method(callback: CallbackQuery, state: FSMContext):
 
     elif method == "crypto":
         text = (
-            f"💎 **CRYPTO PAYMENT**\n\n"
+            f"💎 **CRYPTO PAYMENT INSTRUCTIONS**\n\n"
             f"Top-Up ID: `{topup_id}`\n"
             f"Amount: **${amount:.2f}**\n\n"
-            f"Send exactly **${amount:.2f}** equivalent to one of the addresses:\n\n"
+            f"Send exactly **${amount:.2f}** to one of the wallets:\n\n"
             f"🟢 **USDT (TRC20):**\n`{USDT_TRC20_ADDRESS}`\n\n"
             f"🔵 **TON:**\n`{TON_ADDRESS}`\n\n"
-            f"After sending, click **I Paid** below to send screenshot proof."
+            f"Click **I Paid** below to submit photo proof."
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ I Paid", callback_data=f"i_paid:{topup_id}", style="success")],
@@ -444,7 +500,7 @@ async def cb_payment_method(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("i_paid:"))
 async def cb_i_paid(callback: CallbackQuery, state: FSMContext):
     await state.set_state(RechargeFSM.upload_proof)
-    await callback.message.answer("📸 Please upload/send the screenshot photo of your payment transaction proof now:")
+    await callback.message.answer("📸 Please send/upload your payment screenshot proof now:")
 
 @router.message(StateFilter(RechargeFSM.upload_proof), F.photo)
 async def process_proof_upload(message: Message, state: FSMContext):
@@ -460,16 +516,15 @@ async def process_proof_upload(message: Message, state: FSMContext):
         )
         await db.commit()
 
-    # Alert Admins
     admin_kb = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✅ Approve", callback_data=f"admin_approve_topup:{topup_id}", style="success"),
-            InlineKeyboardButton(text="❌ Reject", callback_data=f"admin_reject_topup:{topup_id}", style="danger")
+            InlineKeyboardButton(text="✅ Approve", callback_data=f"adm_appr_topup:{topup_id}", style="success"),
+            InlineKeyboardButton(text="❌ Reject", callback_data=f"adm_rej_topup:{topup_id}", style="danger")
         ]
     ])
 
     admin_text = (
-        f"🚨 **NEW PAYMENT PROOF SUBMITTED**\n\n"
+        f"🚨 **NEW PAYMENT PROOF RECEIVED**\n\n"
         f"Top-Up ID: `{topup_id}`\n"
         f"User ID: `{message.from_user.id}`\n"
         f"Username: @{message.from_user.username or 'N/A'}\n"
@@ -483,13 +538,13 @@ async def process_proof_upload(message: Message, state: FSMContext):
             pass
 
     await state.clear()
-    await message.answer("✅ Your payment proof has been submitted to Admin! Balance will update once verified.", reply_markup=InlineKeyboardMarkup(inline_keyboard=back_home_buttons()))
+    await message.answer("✅ Screenshot submitted to system admins! Your balance will update upon review.", reply_markup=InlineKeyboardMarkup(inline_keyboard=back_home_buttons()))
 
 # ==========================================
-# ADMIN TOP-UP APPROVAL
+# ADMIN VERIFICATION SYSTEM
 # ==========================================
 
-@router.callback_query(F.data.startswith("admin_approve_topup:"))
+@router.callback_query(F.data.startswith("adm_appr_topup:"))
 async def cb_admin_approve_topup(callback: CallbackQuery):
     if callback.from_user.id not in settings.ADMIN_IDS: return
     topup_id = callback.data.split(":")[1]
@@ -500,7 +555,7 @@ async def cb_admin_approve_topup(callback: CallbackQuery):
             topup = await c.fetchone()
 
         if not topup:
-            await callback.answer("Top-up already processed or not found.", show_alert=True)
+            await callback.answer("Top-up already processed.", show_alert=True)
             return
 
         await db.execute("UPDATE topups SET status = 'approved' WHERE topup_id = ?", (topup_id,))
@@ -510,15 +565,15 @@ async def cb_admin_approve_topup(callback: CallbackQuery):
     try:
         await callback.bot.send_message(
             topup['user_id'],
-            f"🎉 **PAYMENT APPROVED!**\n\nYour top-up of **${topup['amount']:.2f}** has been credited to your balance.",
+            f"🎉 **PAYMENT APPROVED!**\n\nYour balance has been credited with **${topup['amount']:.2f}**.",
             parse_mode="Markdown"
         )
     except Exception:
         pass
 
-    await callback.message.edit_caption(caption=f"{callback.message.caption}\n\n✅ **STATUS: APPROVED BY ADMIN**")
+    await callback.message.edit_caption(caption=f"{callback.message.caption}\n\n✅ **APPROVED BY ADMIN**")
 
-@router.callback_query(F.data.startswith("admin_reject_topup:"))
+@router.callback_query(F.data.startswith("adm_rej_topup:"))
 async def cb_admin_reject_topup(callback: CallbackQuery):
     if callback.from_user.id not in settings.ADMIN_IDS: return
     topup_id = callback.data.split(":")[1]
@@ -536,10 +591,10 @@ async def cb_admin_reject_topup(callback: CallbackQuery):
             except Exception:
                 pass
 
-    await callback.message.edit_caption(caption=f"{callback.message.caption}\n\n❌ **STATUS: REJECTED BY ADMIN**")
+    await callback.message.edit_caption(caption=f"{callback.message.caption}\n\n❌ **REJECTED BY ADMIN**")
 
 # ==========================================
-# ADD ITEM / PRODUCT WORKFLOW (USER & ADMIN)
+# ITEM CREATION FLOW (USER & ADMIN)
 # ==========================================
 
 @router.callback_query(F.data.in_({"admin_add_prod", "user_sell_item"}))
@@ -548,11 +603,11 @@ async def cb_start_add_item(callback: CallbackQuery, state: FSMContext):
     await state.update_data(seller_id=0 if is_admin else callback.from_user.id)
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🥚 Egg", callback_data="prod_type:egg", style="primary")],
-        [InlineKeyboardButton(text="🍗 Chicken", callback_data="prod_type:chicken", style="primary")]
+        [InlineKeyboardButton(text="🥚 Egg Listing", callback_data="prod_type:egg", style="primary")],
+        [InlineKeyboardButton(text="🍗 Chicken Listing", callback_data="prod_type:chicken", style="primary")]
     ])
     await state.set_state(AddProductFSM.select_type)
-    await callback.message.edit_text("Select Product Type to list:", reply_markup=kb)
+    await callback.message.edit_text("Select Product Category to list:", reply_markup=kb)
 
 @router.callback_query(F.data.startswith("prod_type:"), StateFilter(AddProductFSM.select_type))
 async def cb_item_type(callback: CallbackQuery, state: FSMContext):
@@ -566,7 +621,7 @@ async def cb_item_type(callback: CallbackQuery, state: FSMContext):
 
     buttons = [[InlineKeyboardButton(text=f"{c['flag']} {c['name']}", callback_data=f"prod_c:{c['id']}", style="primary")] for c in countries]
     await state.set_state(AddProductFSM.select_country)
-    await callback.message.edit_text("Select Country of Origin:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.message.edit_text("Select Origin Country:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 @router.callback_query(F.data.startswith("prod_c:"), StateFilter(AddProductFSM.select_country))
 async def cb_item_country(callback: CallbackQuery, state: FSMContext):
@@ -588,14 +643,14 @@ async def cb_item_country(callback: CallbackQuery, state: FSMContext):
         ]
 
     await state.set_state(AddProductFSM.select_quality)
-    await callback.message.edit_text("Select Quality:", reply_markup=InlineKeyboardMarkup(inline_keyboard=qual_buttons))
+    await callback.message.edit_text("Select Quality Grade:", reply_markup=InlineKeyboardMarkup(inline_keyboard=qual_buttons))
 
 @router.callback_query(F.data.startswith("qual:"), StateFilter(AddProductFSM.select_quality))
 async def cb_item_qual(callback: CallbackQuery, state: FSMContext):
     qual = callback.data.split(":")[1]
     await state.update_data(quality=qual)
     await state.set_state(AddProductFSM.enter_id)
-    await callback.message.edit_text("Enter a unique Product ID Code (e.g. EG-US-001):")
+    await callback.message.edit_text("Enter a Product ID Code (e.g. EG-US-001):")
 
 @router.message(StateFilter(AddProductFSM.enter_id))
 async def process_item_id(message: Message, state: FSMContext):
@@ -610,11 +665,11 @@ async def process_item_price(message: Message, state: FSMContext):
         price = float(message.text)
         if price <= 0: raise ValueError()
     except ValueError:
-        await message.answer("❌ Invalid price number.")
+        await message.answer("❌ Invalid price.")
         return
     await state.update_data(price=price)
     await state.set_state(AddProductFSM.enter_stock)
-    await message.answer("Enter Stock Quantity available:")
+    await message.answer("Enter Stock Quantity:")
 
 @router.message(StateFilter(AddProductFSM.enter_stock))
 async def process_item_stock(message: Message, state: FSMContext):
@@ -633,22 +688,42 @@ async def process_item_stock(message: Message, state: FSMContext):
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (data['prod_id'], data['seller_id'], data['p_type'], data['country_id'], data['price'], data['quality'], stock))
             await db.commit()
-            await message.answer("✅ Product listing created successfully!", reply_markup=InlineKeyboardMarkup(inline_keyboard=back_home_buttons()))
+            await message.answer("✅ Product listed successfully!", reply_markup=InlineKeyboardMarkup(inline_keyboard=back_home_buttons()))
         except Exception as e:
-            await message.answer(f"❌ Error adding item (ID might already exist): {e}")
+            await message.answer(f"❌ Error listing product: {e}")
     await state.clear()
 
 # ==========================================
-# ADMIN PANEL HANDLERS
+# ADMIN DASHBOARD & CONTROLS
 # ==========================================
 
 @router.callback_query(F.data == "admin_panel")
 async def cb_admin_panel(callback: CallbackQuery):
     if callback.from_user.id not in settings.ADMIN_IDS: return
-    await callback.message.edit_text("👨‍💻 **ADMIN PANEL**", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
+    await callback.message.edit_text("👨‍💻 **ADMIN DASHBOARD**", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
+
+@router.callback_query(F.data == "admin_stats")
+async def cb_admin_stats(callback: CallbackQuery):
+    if callback.from_user.id not in settings.ADMIN_IDS: return
+    async with get_db() as db:
+        async with db.execute("SELECT COUNT(*) FROM users") as u_c:
+            total_users = (await u_c.fetchone())[0]
+        async with db.execute("SELECT COUNT(*), SUM(amount) FROM orders") as o_c:
+            row = await o_c.fetchone()
+            total_orders = row[0] or 0
+            total_revenue = row[1] or 0.0
+
+    text = (
+        f"📊 **SYSTEM STATISTICS**\n\n"
+        f"👥 Total Registered Users: {total_users}\n"
+        f"🛒 Total Orders Completed: {total_orders}\n"
+        f"💰 Total Volume: ${total_revenue:.2f}"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Back", callback_data="admin_panel", style="danger")]])
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
 
 # ==========================================
-# APPLICATION ENTRY POINT
+# APPLICATION LAUNCHER
 # ==========================================
 
 async def main():
@@ -667,4 +742,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot stopped.")
+        logger.info("Bot execution terminated.")
