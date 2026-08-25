@@ -123,11 +123,9 @@ async def init_db():
         
         await db.commit()
 
-async def get_db():
-    conn = await aiosqlite.connect(settings.DATABASE_NAME)
-    conn.row_factory = aiosqlite.Row
-    await conn.execute("PRAGMA foreign_keys = ON;")
-    return conn
+# Corrected get_db: returns connection context manager directly
+def get_db():
+    return aiosqlite.connect(settings.DATABASE_NAME)
 
 # ==========================================
 # FSM STATES
@@ -157,18 +155,18 @@ class AdminUserActionFSM(StatesGroup):
     broadcast_message = State()
 
 # ==========================================
-# KEYBOARD BUILDERS
+# KEYBOARD BUILDERS (WITH STYLED/COLORED BUTTONS)
 # ==========================================
 
 def get_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="🥚 BUY EGG", callback_data="buy_cat:egg"),
-            InlineKeyboardButton(text="🍗 BUY CHICKEN", callback_data="buy_cat:chicken")
+            InlineKeyboardButton(text="🥚 BUY EGG", callback_data="buy_cat:egg", style="primary"),
+            InlineKeyboardButton(text="🍗 BUY CHICKEN", callback_data="buy_cat:chicken", style="primary")
         ],
         [
-            InlineKeyboardButton(text="💳 WALLET RECHARGE", callback_data="wallet_recharge"),
-            InlineKeyboardButton(text="📦 MY ORDERS", callback_data="my_orders")
+            InlineKeyboardButton(text="💳 WALLET RECHARGE", callback_data="wallet_recharge", style="success"),
+            InlineKeyboardButton(text="📦 MY ORDERS", callback_data="my_orders", style="primary")
         ],
         [
             InlineKeyboardButton(text="👤 MY PROFILE", callback_data="my_profile"),
@@ -179,23 +177,23 @@ def get_main_keyboard() -> InlineKeyboardMarkup:
 def get_admin_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="➕ Add Egg", callback_data="admin:add_product:egg"),
-            InlineKeyboardButton(text="➕ Add Chicken", callback_data="admin:add_product:chicken")
+            InlineKeyboardButton(text="➕ Add Egg", callback_data="admin:add_product:egg", style="success"),
+            InlineKeyboardButton(text="➕ Add Chicken", callback_data="admin:add_product:chicken", style="success")
         ],
         [
-            InlineKeyboardButton(text="📦 Manage Eggs", callback_data="admin:manage_prod:egg"),
-            InlineKeyboardButton(text="🍗 Manage Chicken", callback_data="admin:manage_prod:chicken")
+            InlineKeyboardButton(text="📦 Manage Eggs", callback_data="admin:manage_prod:egg", style="primary"),
+            InlineKeyboardButton(text="🍗 Manage Chicken", callback_data="admin:manage_prod:chicken", style="primary")
         ],
         [
-            InlineKeyboardButton(text="🌍 Manage Countries", callback_data="admin:manage_countries"),
-            InlineKeyboardButton(text="👥 Users", callback_data="admin:users")
+            InlineKeyboardButton(text="🌍 Manage Countries", callback_data="admin:manage_countries", style="primary"),
+            InlineKeyboardButton(text="👥 Users", callback_data="admin:users", style="primary")
         ],
         [
             InlineKeyboardButton(text="🛒 Orders", callback_data="admin:orders"),
             InlineKeyboardButton(text="📊 Statistics", callback_data="admin:stats")
         ],
         [
-            InlineKeyboardButton(text="📢 Broadcast", callback_data="admin:broadcast"),
+            InlineKeyboardButton(text="📢 Broadcast", callback_data="admin:broadcast", style="danger"),
             InlineKeyboardButton(text="🏠 User Main Menu", callback_data="main_menu")
         ]
     ])
@@ -203,8 +201,8 @@ def get_admin_keyboard() -> InlineKeyboardMarkup:
 def back_home_buttons() -> List[List[InlineKeyboardButton]]:
     return [
         [
-            InlineKeyboardButton(text="⬅️ BACK", callback_data="main_menu"),
-            InlineKeyboardButton(text="🏠 MAIN MENU", callback_data="main_menu")
+            InlineKeyboardButton(text="⬅️ BACK", callback_data="main_menu", style="danger"),
+            InlineKeyboardButton(text="🏠 MAIN MENU", callback_data="main_menu", style="primary")
         ]
     ]
 
@@ -216,7 +214,9 @@ def is_admin(user_id: int) -> bool:
     return user_id in settings.ADMIN_IDS
 
 async def get_or_create_user(telegram_id: int, username: Optional[str], first_name: Optional[str]) -> dict:
-    async with await get_db() as db:
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("PRAGMA foreign_keys = ON;")
         async with db.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)) as cursor:
             user = await cursor.fetchone()
             if not user:
@@ -273,7 +273,8 @@ async def cb_main_menu(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "my_profile")
 async def cb_my_profile(callback: CallbackQuery):
     user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-    async with await get_db() as db:
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
         async with db.execute("SELECT COUNT(*), SUM(amount) FROM orders WHERE user_id = ?", (user['telegram_id'],)) as c:
             row = await c.fetchone()
             total_orders = row[0] or 0
@@ -311,7 +312,8 @@ async def cb_help(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("buy_cat:"))
 async def cb_select_category(callback: CallbackQuery):
     p_type = callback.data.split(":")[1] # 'egg' or 'chicken'
-    async with await get_db() as db:
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM countries WHERE is_enabled = 1") as cursor:
             countries = await cursor.fetchall()
 
@@ -323,7 +325,8 @@ async def cb_select_category(callback: CallbackQuery):
     for c in countries:
         buttons.append([InlineKeyboardButton(
             text=f"{c['flag']} {c['name']}",
-            callback_data=f"buy_country:{p_type}:{c['id']}"
+            callback_data=f"buy_country:{p_type}:{c['id']}",
+            style="primary"
         )])
     buttons.extend(back_home_buttons())
     
@@ -333,7 +336,8 @@ async def cb_select_category(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("buy_country:"))
 async def cb_list_products(callback: CallbackQuery):
     _, p_type, country_id = callback.data.split(":")
-    async with await get_db() as db:
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM countries WHERE id = ?", (country_id,)) as c_cur:
             country = await c_cur.fetchone()
         
@@ -344,7 +348,7 @@ async def cb_list_products(callback: CallbackQuery):
             products = await p_cur.fetchall()
 
     if not products:
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Back", callback_data=f"buy_cat:{p_type}")]])
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Back", callback_data=f"buy_cat:{p_type}", style="danger")]])
         await callback.message.edit_text(f"❌ No available {p_type} listings for {country['flag']} {country['name']}.", reply_markup=kb)
         return
 
@@ -360,16 +364,18 @@ async def cb_list_products(callback: CallbackQuery):
         )
         buttons.append([InlineKeyboardButton(
             text=f"BUY {p['product_id']} (${p['price']:.2f})",
-            callback_data=f"view_prod:{p['product_id']}"
+            callback_data=f"view_prod:{p['product_id']}",
+            style="success"
         )])
     
-    buttons.append([InlineKeyboardButton(text="⬅️ Back", callback_data=f"buy_cat:{p_type}")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Back", callback_data=f"buy_cat:{p_type}", style="danger")])
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("view_prod:"))
 async def cb_view_product(callback: CallbackQuery):
     prod_id = callback.data.split(":")[1]
-    async with await get_db() as db:
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
         async with db.execute("""
             SELECT p.*, c.name as country_name, c.flag as country_flag 
             FROM products p 
@@ -393,8 +399,8 @@ async def cb_view_product(callback: CallbackQuery):
     )
     
     buttons = [
-        [InlineKeyboardButton(text="🛒 BUY NOW", callback_data=f"confirm_buy:{p['product_id']}")],
-        [InlineKeyboardButton(text="⬅️ BACK", callback_data=f"buy_country:{p['type']}:{p['country_id']}")]
+        [InlineKeyboardButton(text="🛒 BUY NOW", callback_data=f"confirm_buy:{p['product_id']}", style="success")],
+        [InlineKeyboardButton(text="⬅️ BACK", callback_data=f"buy_country:{p['type']}:{p['country_id']}", style="danger")]
     ]
     
     if p['image_file_id']:
@@ -413,7 +419,8 @@ async def cb_confirm_buy(callback: CallbackQuery):
     prod_id = callback.data.split(":")[1]
     user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
 
-    async with await get_db() as db:
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
         async with db.execute("""
             SELECT p.*, c.name as country_name, c.flag as country_flag 
             FROM products p 
@@ -434,8 +441,8 @@ async def cb_confirm_buy(callback: CallbackQuery):
             f"Please recharge your wallet to proceed."
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💳 RECHARGE", callback_data="wallet_recharge")],
-            [InlineKeyboardButton(text="⬅️ BACK", callback_data=f"view_prod:{prod_id}")]
+            [InlineKeyboardButton(text="💳 RECHARGE", callback_data="wallet_recharge", style="success")],
+            [InlineKeyboardButton(text="⬅️ BACK", callback_data=f"view_prod:{prod_id}", style="danger")]
         ])
         await callback.message.answer(text, reply_markup=kb, parse_mode="Markdown")
         return
@@ -451,8 +458,8 @@ async def cb_confirm_buy(callback: CallbackQuery):
     )
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ CONFIRM", callback_data=f"exec_buy:{prod_id}")],
-        [InlineKeyboardButton(text="❌ CANCEL", callback_data="main_menu")]
+        [InlineKeyboardButton(text="✅ CONFIRM", callback_data=f"exec_buy:{prod_id}", style="success")],
+        [InlineKeyboardButton(text="❌ CANCEL", callback_data="main_menu", style="danger")]
     ])
     await callback.message.answer(text, reply_markup=kb, parse_mode="Markdown")
 
@@ -461,16 +468,14 @@ async def cb_execute_buy(callback: CallbackQuery):
     prod_id = callback.data.split(":")[1]
     user_id = callback.from_user.id
 
-    # Atomic Purchase Transaction Simulation
-    async with await get_db() as db:
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
         try:
             await db.execute("BEGIN IMMEDIATE")
             
-            # Re-check user balance
             async with db.execute("SELECT balance FROM users WHERE telegram_id = ?", (user_id,)) as u_cur:
                 user = await u_cur.fetchone()
             
-            # Re-check product stock
             async with db.execute("SELECT * FROM products WHERE product_id = ? AND status = 'available'", (prod_id,)) as p_cur:
                 p = await p_cur.fetchone()
 
@@ -484,23 +489,19 @@ async def cb_execute_buy(callback: CallbackQuery):
                 await callback.answer("❌ Purchase failed: Insufficient balance.", show_alert=True)
                 return
 
-            # Deduct Balance
             new_balance = user['balance'] - p['price']
             await db.execute("UPDATE users SET balance = ? WHERE telegram_id = ?", (new_balance, user_id))
 
-            # Reduce Stock / Update Product Status
             new_stock = p['stock'] - 1
             new_status = 'sold' if new_stock == 0 else 'available'
             await db.execute("UPDATE products SET stock = ?, status = ? WHERE product_id = ?", (new_stock, new_status, prod_id))
 
-            # Generate Order
             order_id = f"ORD-{random.randint(100000, 999999)}"
             await db.execute(
                 "INSERT INTO orders (order_id, user_id, product_id, product_type, amount, status) VALUES (?, ?, ?, ?, ?, ?)",
                 (order_id, user_id, prod_id, p['type'], p['price'], "completed")
             )
 
-            # Record Wallet Transaction
             tx_id = f"TX-{random.randint(100000, 999999)}"
             await db.execute(
                 "INSERT INTO wallet_transactions (transaction_id, user_id, amount, type, description) VALUES (?, ?, ?, ?, ?)",
@@ -518,12 +519,11 @@ async def cb_execute_buy(callback: CallbackQuery):
                 f"💰 Remaining Balance: **${new_balance:.2f}**"
             )
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📦 MY ORDERS", callback_data="my_orders")],
-                [InlineKeyboardButton(text="🏠 MAIN MENU", callback_data="main_menu")]
+                [InlineKeyboardButton(text="📦 MY ORDERS", callback_data="my_orders", style="primary")],
+                [InlineKeyboardButton(text="🏠 MAIN MENU", callback_data="main_menu", style="primary")]
             ])
             await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
 
-            # Admin notification
             for admin_id in settings.ADMIN_IDS:
                 try:
                     await callback.bot.send_message(
@@ -562,12 +562,9 @@ async def process_recharge(message: Message, state: FSMContext):
         return
 
     await state.clear()
-    
-    # Server-side verification simulation (using Mock Provider API)
     pay_id = f"PAY-{random.randint(100000, 999999)}"
     
-    # Auto credit balance for mock/demo purposes
-    async with await get_db() as db:
+    async with get_db() as db:
         await db.execute("UPDATE users SET balance = balance + ? WHERE telegram_id = ?", (amount, message.from_user.id))
         await db.execute(
             "INSERT INTO wallet_transactions (transaction_id, user_id, amount, type, description) VALUES (?, ?, ?, ?, ?)",
@@ -591,7 +588,8 @@ async def process_recharge(message: Message, state: FSMContext):
 @router.callback_query(F.data == "my_orders")
 async def cb_my_orders(callback: CallbackQuery):
     user_id = callback.from_user.id
-    async with await get_db() as db:
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
         async with db.execute("""
             SELECT o.*, p.type, c.flag, c.name as country_name 
             FROM orders o 
@@ -629,12 +627,13 @@ async def cb_admin_add_prod(callback: CallbackQuery, state: FSMContext):
     p_type = callback.data.split(":")[2]
     await state.update_data(p_type=p_type)
 
-    async with await get_db() as db:
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM countries") as cursor:
             countries = await cursor.fetchall()
 
-    buttons = [[InlineKeyboardButton(text=f"{c['flag']} {c['name']}", callback_data=f"admin_sel_c:{c['id']}")] for c in countries]
-    buttons.append([InlineKeyboardButton(text="❌ Cancel", callback_data="admin_panel")])
+    buttons = [[InlineKeyboardButton(text=f"{c['flag']} {c['name']}", callback_data=f"admin_sel_c:{c['id']}", style="primary")] for c in countries]
+    buttons.append([InlineKeyboardButton(text="❌ Cancel", callback_data="admin_panel", style="danger")])
 
     await state.set_state(AddProductFSM.select_country)
     await callback.message.edit_text(f"➕ **ADD {p_type.upper()}**\n\nSelect Country:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
@@ -663,8 +662,8 @@ async def process_prod_price(message: Message, state: FSMContext):
     await state.update_data(price=price)
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🥚 Fresh", callback_data="qual:Fresh")],
-        [InlineKeyboardButton(text="💔 Broken", callback_data="qual:Broken")],
+        [InlineKeyboardButton(text="🥚 Fresh", callback_data="qual:Fresh", style="success")],
+        [InlineKeyboardButton(text="💔 Broken", callback_data="qual:Broken", style="danger")],
     ])
     await state.set_state(AddProductFSM.select_quality)
     await message.answer("Select Quality:", reply_markup=kb)
@@ -700,7 +699,8 @@ async def process_prod_photo(message: Message, state: FSMContext):
     await state.update_data(image_file_id=image_id)
 
     data = await state.get_data()
-    async with await get_db() as db:
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
         async with db.execute("SELECT name, flag FROM countries WHERE id = ?", (data['country_id'],)) as c:
             country = await c.fetchone()
 
@@ -715,8 +715,8 @@ async def process_prod_photo(message: Message, state: FSMContext):
     )
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ PUBLISH", callback_data="pub_prod")],
-        [InlineKeyboardButton(text="❌ CANCEL", callback_data="admin_panel")]
+        [InlineKeyboardButton(text="✅ PUBLISH", callback_data="pub_prod", style="success")],
+        [InlineKeyboardButton(text="❌ CANCEL", callback_data="admin_panel", style="danger")]
     ])
     await state.set_state(AddProductFSM.preview)
     await message.answer(preview, reply_markup=kb, parse_mode="Markdown")
@@ -724,7 +724,7 @@ async def process_prod_photo(message: Message, state: FSMContext):
 @router.callback_query(F.data == "pub_prod", StateFilter(AddProductFSM.preview))
 async def cb_publish_prod(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    async with await get_db() as db:
+    async with get_db() as db:
         try:
             await db.execute("""
                 INSERT INTO products (product_id, type, country_id, price, quality, description, image_file_id, stock)
@@ -748,20 +748,23 @@ async def cb_admin_panel(callback: CallbackQuery):
 @router.callback_query(F.data == "admin:manage_countries")
 async def cb_manage_countries(callback: CallbackQuery):
     if not is_admin(callback.from_user.id): return
-    async with await get_db() as db:
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM countries") as c:
             countries = await c.fetchall()
 
     buttons = []
     for country in countries:
         status_icon = "🟢" if country['is_enabled'] else "🔴"
+        style_color = "success" if country['is_enabled'] else "danger"
         buttons.append([InlineKeyboardButton(
             text=f"{status_icon} {country['flag']} {country['name']}",
-            callback_data=f"admin_toggle_c:{country['id']}"
+            callback_data=f"admin_toggle_c:{country['id']}",
+            style=style_color
         )])
     
-    buttons.append([InlineKeyboardButton(text="➕ ADD COUNTRY", callback_data="admin_add_country")])
-    buttons.append([InlineKeyboardButton(text="⬅️ Back", callback_data="admin_panel")])
+    buttons.append([InlineKeyboardButton(text="➕ ADD COUNTRY", callback_data="admin_add_country", style="primary")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Back", callback_data="admin_panel", style="danger")])
     
     await callback.message.edit_text("🌍 **COUNTRY MANAGEMENT**\nClick a country to toggle Enable/Disable status:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
 
@@ -769,7 +772,7 @@ async def cb_manage_countries(callback: CallbackQuery):
 async def cb_toggle_country(callback: CallbackQuery):
     if not is_admin(callback.from_user.id): return
     c_id = callback.data.split(":")[1]
-    async with await get_db() as db:
+    async with get_db() as db:
         await db.execute("UPDATE countries SET is_enabled = NOT is_enabled WHERE id = ?", (c_id,))
         await db.commit()
     await cb_manage_countries(callback)
@@ -781,7 +784,7 @@ async def cb_toggle_country(callback: CallbackQuery):
 @router.callback_query(F.data == "admin:stats")
 async def cb_admin_stats(callback: CallbackQuery):
     if not is_admin(callback.from_user.id): return
-    async with await get_db() as db:
+    async with get_db() as db:
         async with db.execute("SELECT COUNT(*) FROM users") as c1:
             total_users = (await c1.fetchone())[0]
         async with db.execute("SELECT COUNT(*), SUM(amount) FROM orders") as c2:
@@ -795,7 +798,7 @@ async def cb_admin_stats(callback: CallbackQuery):
         f"🛒 **Total Orders:** {total_orders}\n"
         f"💰 **Total Revenue:** ${total_revenue:.2f}"
     )
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Back", callback_data="admin_panel")]])
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Back", callback_data="admin_panel", style="danger")]])
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
 
 # ==========================================
