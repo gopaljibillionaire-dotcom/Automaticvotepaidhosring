@@ -1,29 +1,16 @@
 import os
-import sys
-import logging
+from typing import List
+from pydantic_settings import BaseSettings
 
-# --- LOGGING SETUP ---
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
-logger = logging.getLogger("MultiAccountSystem")
+class Settings(BaseSettings):
+    BOT_TOKEN: str = os.getenv("BOT_TOKEN", "7353822838:AAEUvYQ8pGRGyBtSH9kzKVYiRQ3VgjVOCa4")
+    DATABASE_NAME: str = os.getenv("DATABASE_NAME", "market_bot.db")
+    ADMIN_IDS: List[int] = [int(x) for x in os.getenv("ADMIN_IDS", "7952327997").split(",") if x.strip()]
+    PAYMENT_API_KEY: str = os.getenv("PAYMENT_API_KEY", "mock_key")
+    PAYMENT_SECRET: str = os.getenv("PAYMENT_SECRET", "mock_secret")
+    WEBHOOK_PORT: int = int(os.getenv("WEBHOOK_PORT", "8080"))
 
-# --- CREDENTIALS ---
-API_ID = int(os.getenv("TG_API_ID", "39314327"))
-API_HASH = os.getenv("TG_API_HASH", "c5acbe2a40062d1141713e95c9f704d6")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8788369960:AAHoheW7W5tpcRdqxa4Nekx4rxefc_4z3YY")
+    class Config:
+        env_file = ".env"
 
-# HARDCODED SUPER-OWNER IDS
-SUPER_OWNER_IDS = [7952327997, 7953147643, 8064493735, 6294187729] 
-
-# DEVELOPER ATTRIBUTIONS
-DESIGNER_HANDLE = "Gopalji_choubey"
-MANAGER_HANDLE = "BMWM4Z"
-
-# CRYPTO KEY FOR LOCAL DATABASE OBFUSCATION
-SECRET_KEY = os.getenv("ENCRYPTION_KEY", "secure_fallback_key_2026")
-
-# AUDIT CHANNEL FOR TELEGRAM LOG EVENTS
-LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "-1003929609682"))
+settings = Settings()
